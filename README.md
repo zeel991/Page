@@ -15,11 +15,7 @@ writes the postmortem the next morning.
 Pager Developer does all of that, and stops exactly where a human should take over.
 
 <p align="center">
-  <a href="https://youtu.be/2Bos0VkR3jg">
-    <img src="docs/demo-poster.png" alt="Watch the 2-minute demo" width="100%"/>
-  </a>
-  <br/>
-  <sub><b><a href="https://youtu.be/2Bos0VkR3jg">▶ Watch the 2-minute demo</a></b> — a real bug, found and fixed end to end</sub>
+  <img src="docs/landing.png" alt="The Pager Developer landing page" width="100%"/>
 </p>
 
 <p align="center">
@@ -137,6 +133,23 @@ The most valuable thing this system does is refuse.
   validated against a tree that is not the failing one proves nothing, so the
   workflow halts instead.
 
+## The website
+
+`apps/web` is two surfaces in one Next.js app, set in the same visual language:
+
+- **`/`** — the landing page: what the agent does, the guarantees it enforces, the
+  measured incident above, and how to run it.
+- **`/dashboard`** — the incident command centre: open incidents, deployments, agent
+  runs and policies, read from the API. It is read-only; nothing in it can act on
+  production.
+
+<p align="center">
+  <img src="docs/dashboard.png" alt="The incident command centre" width="100%"/>
+</p>
+
+The halftone pager on the overview reflects real state: it rings, showing the top
+severity, only while an incident is open, and reads `CLEAR` otherwise.
+
 ## Quick start
 
 Everything below runs with no credentials and no network, against local twins.
@@ -155,7 +168,7 @@ pnpm api              # API on http://127.0.0.1:4000
 pnpm --filter @pager/web dev   # landing page on http://127.0.0.1:4100, command centre at /dashboard
 ```
 
-`pnpm verify` — typecheck, lint, **334 tests**, build — must pass before any commit.
+`pnpm verify` — typecheck, lint, **339 tests**, build — must pass before any commit.
 
 A reasoning model is optional. Without one the system still detects, files, notifies,
 reproduces and hands off; it simply never claims to have diagnosed anything.
@@ -216,7 +229,7 @@ packages/
   twin-local/     offline twin server with real diffs and deterministic reset
 apps/
   api/            Fastify read API; owns the database connection
-  web/            Next.js incident command centre
+  web/            Next.js landing page and incident command centre
   worker/         the autonomous loop + live dashboard + Slack merge endpoint
 evals/            scenarios, evaluation harness, demos
 demo/checkout-api the service it watches — a real, deployable repository
@@ -249,5 +262,5 @@ Repository content, logs and runbooks are treated as **data, never as instructio
 ---
 
 <p align="center">
-  <sub>7 packages · 3 apps · 136 TypeScript files · 28 test suites · 334 tests</sub>
+  <sub>7 packages · 3 apps · 149 TypeScript files · 28 test suites · 339 tests</sub>
 </p>
