@@ -1,0 +1,29 @@
+{
+  "name": "@pager/evals",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "preflight": "node --env-file-if-exists=../.env --experimental-strip-types src/preflight.ts",
+    "provision": "node --env-file-if-exists=../.env --experimental-strip-types src/provision.ts",
+    "phase1": "node --env-file-if-exists=../.env --experimental-strip-types src/phase1-demo.ts",
+    "local": "node --env-file-if-exists=../.env --experimental-strip-types src/local-demo.ts",
+    "eval": "node --env-file-if-exists=../.env --experimental-strip-types src/run-evals.ts",
+    "workflow": "node --env-file-if-exists=../.env --experimental-strip-types src/workflow-demo.ts",
+    "eval:agent": "node --env-file-if-exists=../.env --experimental-strip-types src/run-agent-evals.ts",
+    "probe:datadog": "node --env-file-if-exists=../.env --experimental-strip-types src/datadog-probe.ts"
+  },
+  "dependencies": {
+    "@pager/agents": "workspace:*",
+    "@pager/core": "workspace:*",
+    "@pager/observability": "workspace:*",
+    "@pager/providers": "workspace:*",
+    "arga-sdk": "^0.1.3",
+    "zod": "^4.1.5",
+    "@pager/twin-local": "workspace:*",
+    "@pager/db": "workspace:*",
+    "@pager/sandbox": "workspace:*"
+  }
+}

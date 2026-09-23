@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.next/
+coverage/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+.pager/
+sandboxes/
+.arga-run
+.next/

@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+/*
+ * One system for two surfaces: the public landing page and the incident console.
+ *
+ * The language is Swiss and blunt — a grotesk set large, a 12-column grid, hairline
+ * rules, and a single signal red. The console stays dark because it is read at
+ * 3 AM next to Datadog and a terminal; the landing page alternates red, paper and
+ * ink bands the way a printed broadsheet would.
+ *
+ * Red is the brand, and it is also the alarm. That is deliberate rather than
+ * accidental: the only things coloured red in the console are things that want a
+ * person's attention. SEV1 is additionally *filled*, so it never depends on hue
+ * alone. Tabular numerals throughout so a changing value does not reflow its row.
+ */
+@theme {
+  --color-ink: #0d0d0d;
+  --color-panel: #131313;
+  --color-panel-2: #1c1c1c;
+  --color-edge: #383838;
+  --color-edge-soft: #262626;
+  --color-text: #f4f2ee;
+  --color-muted: #a8a49c;
+  --color-dim: #6d6a64;
+
+  --color-signal: #f2301b;
+  --color-signal-deep: #c9240f;
+  --color-paper: #f4f2ee;
+  --color-paper-2: #e9e6e0;
+  --color-rule: #d6d2ca;
+  --color-carbon: #131313;
+  --color-graphite: #383838;
+
+  --color-sev1: #f2301b;
+  --color-sev2: #ff8a3d;
+  --color-sev3: #f5c542;
+  --color-sev4: #8fb3ff;
+  --color-ok: #3ddc84;
+  --color-accent: #ff5a45;
+
+  --font-sans: "Stack Sans Text", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Stack Sans Headline", "Stack Sans Text", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --animate-marquee: marquee var(--marquee-duration, 40s) linear infinite;
+  --animate-blink: blink 1.1s steps(2, start) infinite;
+  --animate-rise: rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@keyframes blink {
+  to { visibility: hidden; }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: none; }
+}
+
+html, body {
+  background: var(--color-ink);
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The display face: set tight and heavy, the way the reference sets its headlines. */
+.display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.045em;
+  line-height: 0.86;
+  text-transform: uppercase;
+  /* Headline figures stand alone rather than in columns, and the face's tabular 1 carries a foot serif. */
+  font-variant-numeric: proportional-nums;
+}
+
+/* Small uppercase labels: section eyebrows, table heads, stat captions. */
+.eyebrow {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Reveal-on-scroll. The class is added by <Reveal>; without JS content stays visible. */
+.reveal { opacity: 0; transform: translateY(28px); transition: opacity 0.9s cubic-bezier(0.16, 1, 0.3, 1), transform 0.9s cubic-bezier(0.16, 1, 0.3, 1); }
+.reveal.is-in { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  .reveal { opacity: 1; transform: none; }
+}
+
+::selection { background: var(--color-signal); color: #fff; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--color-ink); }
+::-webkit-scrollbar-thumb { background: var(--color-edge); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
