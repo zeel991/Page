@@ -92,7 +92,11 @@ export class CheckoutService {
 
 async function main(): Promise<void> {
   const spec = INC_001;
-  const server = new LocalTwinServer({ now: () => Date.parse('2026-09-13T14:45:00Z') });
+  // One clock for the twin and the workflow. The watcher's evidence window ends at
+  // "now", so a workflow on the wall clock would search days past the fixture's
+  // errors, find none, and decline to escalate.
+  const now = () => new Date('2026-09-13T14:45:00Z');
+  const server = new LocalTwinServer({ now: () => now().getTime() });
   server.seed(seedFromFixture(spec));
   const endpoints = await server.start();
 
@@ -162,6 +166,7 @@ async function main(): Promise<void> {
     email: new ResendProvider({ baseUrl: endpoints.resend, apiKey: 're_test', from: 'pager@acme.dev' }),
     tracer,
     patchGenerator,
+    now,
     investigator: model
       ? new IncidentInvestigator({ model, tracer, providers: { observability, sourceControl, knowledge } })
       : null,

@@ -93,7 +93,9 @@ async function main(): Promise<void> {
 
   for (const id of ids) {
     const spec = fixture(id);
-    const server = new LocalTwinServer({ now: () => Date.parse(spec.deployedAt) + 14 * 60_000 });
+    // One clock for the twin and the workflow; see workflow-demo.ts.
+    const now = () => new Date(Date.parse(spec.deployedAt) + 14 * 60_000);
+    const server = new LocalTwinServer({ now: () => now().getTime() });
     server.seed(seedFromFixture(spec));
     const endpoints = await server.start();
 
@@ -142,6 +144,7 @@ async function main(): Promise<void> {
         knowledge,
         email: new ResendProvider({ baseUrl: endpoints.resend, apiKey: 're_seed', from: 'pager@acme.dev' }),
         tracer,
+        now,
         ...(patchGenerator ? { patchGenerator } : {}),
         investigator: model
           ? new IncidentInvestigator({ model, tracer, providers: { observability, sourceControl, knowledge } })
