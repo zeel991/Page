@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { CountUp } from '@/components/motion/count-up';
 import { CopyButton } from '@/components/motion/copy-button';
 import { DitherIncident, DitherPager } from '@/components/motion/dither';
+import { MagneticScroll } from '@/components/motion/magnetic-scroll';
 import { Reveal } from '@/components/motion/reveal';
 import { ScrambleText } from '@/components/motion/scramble-text';
 import { ShapeGrid } from '@/components/motion/shape-grid';
@@ -88,8 +89,9 @@ pnpm --filter @pager/web dev`;
 export default function LandingPage() {
   return (
     <div id="top" className="overflow-x-clip bg-paper text-carbon">
+      <MagneticScroll />
       {/* ─────────────────────────────── HERO ─────────────────────────────── */}
-      <section className="relative overflow-hidden bg-signal text-paper">
+      <section data-snap className="relative overflow-hidden bg-signal text-paper">
         <div className="mx-auto flex max-w-[1440px] flex-col px-5 pb-8 md:min-h-[100svh] md:px-10">
           <header className="flex items-center justify-between py-6">
             <Wordmark />
@@ -182,7 +184,7 @@ export default function LandingPage() {
       />
 
       {/* ──────────────────────────── GUARANTEES ──────────────────────────── */}
-      <section id="guarantees" className="mx-auto max-w-[1440px] px-5 py-20 md:px-10 md:py-28">
+      <section id="guarantees" data-snap className="mx-auto max-w-[1440px] px-5 py-20 md:px-10 md:py-28">
         <div className="mb-10 grid grid-cols-12 gap-5">
           <SectionLabel className="col-span-12 md:col-span-3">Guarantees</SectionLabel>
           <p className="col-span-12 max-w-xl text-[15px] leading-relaxed text-graphite md:col-span-6 md:col-start-7">
@@ -216,7 +218,7 @@ export default function LandingPage() {
       </section>
 
       {/* ───────────────────────────── NUMBERS ────────────────────────────── */}
-      <section id="numbers" className="bg-carbon text-paper">
+      <section id="numbers" data-snap className="bg-carbon text-paper">
         <div className="relative overflow-hidden">
           <ShapeGrid />
           <div className="relative mx-auto flex max-w-[1440px] flex-wrap items-end justify-between gap-6 px-5 pt-20 pb-10 md:px-10 md:pt-28">
@@ -308,7 +310,7 @@ export default function LandingPage() {
       </section>
 
       {/* ─────────────────────────────── LOOP ─────────────────────────────── */}
-      <section id="loop" className="mx-auto max-w-[1440px] px-5 py-20 md:px-10 md:py-28">
+      <section id="loop" data-snap className="mx-auto max-w-[1440px] px-5 py-20 md:px-10 md:py-28">
         <div className="mb-10 flex flex-wrap items-end justify-between gap-6">
           <div>
             <SectionLabel className="mb-4">Alert to postmortem</SectionLabel>
@@ -383,7 +385,7 @@ export default function LandingPage() {
       </section>
 
       {/* ───────────────────────────── REFUSALS ───────────────────────────── */}
-      <section className="bg-signal text-paper">
+      <section data-snap className="bg-signal text-paper">
         <div className="mx-auto grid max-w-[1440px] grid-cols-12 gap-y-10 px-5 py-20 md:px-10 md:py-28">
           <div className="col-span-12 lg:col-span-5">
             <SectionLabel className="mb-4">The most valuable thing it does</SectionLabel>
@@ -412,7 +414,7 @@ export default function LandingPage() {
       </section>
 
       {/* ────────────────────────────── RUN IT ────────────────────────────── */}
-      <section id="run" className="bg-graphite text-paper">
+      <section id="run" data-snap className="bg-graphite text-paper">
         <div className="mx-auto max-w-[1440px] px-5 pt-20 md:px-10 md:pt-28">
           <div className="flex flex-wrap items-end justify-between gap-6 pb-10">
             <h2 className="display text-[clamp(64px,12vw,190px)]">Run it</h2>
