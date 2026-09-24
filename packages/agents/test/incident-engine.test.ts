@@ -9,6 +9,7 @@ import {
   repositories as reposTable,
   services,
   type DatabaseHandle,
+  incidentUnitOfWork,
   migrate,
 } from '@pager/db';
 import { IncidentEngine } from '../src/incident-engine.js';
@@ -176,5 +177,41 @@ describe('IncidentEngine', () => {
     const events = await timeline.forIncident(incident.id);
     expect(events.at(-1)!.kind).toBe('slack_posted');
     expect(events.at(-1)!.toState).toBeNull();
+  });
+
+  // Two agents racing to move the same incident used to both validate against the
+  // same old state. With the row locked in a transaction, the second sees the first.
+  it('lets only one of two concurrent transitions from the same state succeed', async () => {
+    const locked = new IncidentEngine(incidents, timeline, audit, incidentUnitOfWork(handle.db));
+    const incident = await openIncident();
+    const results = await Promise.allSettled([
+      locked.transition(incident.id, { to: 'INVESTIGATING', summary: 'agent A' }),
+      locked.transition(incident.id, { to: 'INVESTIGATING', summary: 'agent B' }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    const changes = (await timeline.forIncident(incident.id)).filter((e) => e.kind === 'state_changed');
+    expect(changes).toHaveLength(1);
+  });
+
+  it('keeps the audit record of a refused transition inside a transaction', async () => {
+    const locked = new IncidentEngine(incidents, timeline, audit, incidentUnitOfWork(handle.db));
+    const incident = await openIncident();
+    await expect(locked.transition(incident.id, { to: 'RESOLVED', summary: 'skip ahead' })).rejects.toBeInstanceOf(
+      InvalidTransitionError,
+    );
+    const entries = await audit.forIncident(incident.id);
+    expect(entries.some((e) => e.allowed === false && e.action.includes('->RESOLVED'))).toBe(true);
+  });
+
+  // Keys are max+1, so two incidents opened together can pick the same one.
+  it('retries key allocation when another incident took the key first', async () => {
+    const first = await openIncident();
+    const realNextKey = incidents.nextKey.bind(incidents);
+    let calls = 0;
+    incidents.nextKey = async (org, prefix) => (++calls === 1 ? first.key : realNextKey(org, prefix));
+    const second = await openIncident();
+    expect(second.key).not.toBe(first.key);
+    expect(calls).toBe(2);
   });
 });

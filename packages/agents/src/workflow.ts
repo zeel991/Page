@@ -1025,9 +1025,14 @@ export class IncidentWorkflow {
     if (recovery.verdict === 'NOT_RECOVERED') {
       result.haltReason =
         `The fix shipped but production has not recovered. ${recovery.summary} ` +
-        `The incident remains open and no write-up is sent, because there is nothing settled to report.`;
+        `The incident remains open, handed to a human as UNRESOLVED, and no write-up is sent, because there is nothing settled to report.`;
       step('halted', result.haltReason);
       await note('recovery_not_verified', result.haltReason);
+      // Out of VERIFYING_RECOVERY: left there, the incident would look like it was
+      // still being watched when nothing more will happen without a person. It stays
+      // unresolved (resolvedAt is never set), so it still counts as open.
+      await advance('UNRESOLVED', `Production did not recover after the fix. ${recovery.summary}`);
+      result.recoveryVerdict = recovery.verdict;
       return result;
     }
 

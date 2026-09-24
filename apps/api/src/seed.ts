@@ -35,6 +35,7 @@ import {
   InvestigationRepository,
   TelemetryRepository,
   TimelineRepository,
+  incidentUnitOfWork,
   organizations,
   repositories as reposTable,
   services,
@@ -81,7 +82,7 @@ async function main(): Promise<void> {
   const evidence = new EvidenceRepository(handle.db);
   const investigationRepo = new InvestigationRepository(handle.db);
   const fixes = new FixRepository(handle.db);
-  const engine = new IncidentEngine(incidents, timeline, audit);
+  const engine = new IncidentEngine(incidents, timeline, audit, incidentUnitOfWork(handle.db));
   const availability = describeModelAvailability();
   const model = modelFromEnv();
   console.log(

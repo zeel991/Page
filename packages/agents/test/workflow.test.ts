@@ -238,6 +238,7 @@ describe('IncidentWorkflow', () => {
 
     expect(after.recovery!.recovered).toBe(false);
     expect(after.haltReason).toMatch(/remains open/);
+    expect(after.recoveryVerdict).toBe('NOT_RECOVERED');
     // No write-up and no email: there is nothing settled to report.
     expect(after.writeUpUrl).toBeNull();
     expect(server.current.emails).toHaveLength(0);

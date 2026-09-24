@@ -4,11 +4,14 @@ import {
   isTerminal,
   type IncidentState,
 } from '@pager/core';
-import type {
-  AuditRepository,
-  IncidentRepository,
-  IncidentRow,
-  TimelineRepository,
+import {
+  isUniqueViolation,
+  type AuditRepository,
+  type IncidentRepositories,
+  type IncidentRepository,
+  type IncidentRow,
+  type IncidentUnitOfWork,
+  type TimelineRepository,
 } from '@pager/db';
 
 /**
@@ -37,11 +40,20 @@ export interface TransitionInput {
   actor?: string;
 }
 
+/** Attempts to allocate an incident key before giving up on a contended organisation. */
+const KEY_ATTEMPTS = 5;
+
 export class IncidentEngine {
+  /**
+   * @param unitOfWork When given — and it should be, against a real database —
+   *   every transition runs in one transaction with the incident row locked, so two
+   *   concurrent transitions cannot both validate against the same old state.
+   */
   constructor(
     private readonly incidents: IncidentRepository,
     private readonly timeline: TimelineRepository,
     private readonly audit: AuditRepository,
+    private readonly unitOfWork?: IncidentUnitOfWork,
   ) {}
 
   async open(input: {
@@ -52,19 +64,29 @@ export class IncidentEngine {
     suspectedDeploymentId?: string | null;
     keyPrefix?: string;
   }): Promise<IncidentRow> {
-    const key = await this.incidents.nextKey(input.organizationId, input.keyPrefix);
-    const incident = await this.incidents.create({
-      organizationId: input.organizationId,
-      serviceId: input.serviceId,
-      key,
-      title: input.title,
-      severity: input.severity,
-      state: 'INCIDENT_OPEN',
-      suspectedDeploymentId: input.suspectedDeploymentId ?? null,
-      // Deliberately null. A deployment being suspected is not an attribution, and
-      // leaving this unset until Phase 3 produces evidence is the whole point.
-      deploymentAttribution: null,
-    });
+    // Keys are allocated as max+1, so two incidents opened at once can pick the same
+    // one; the unique (organization, key) index refuses the second, which retries.
+    let incident: IncidentRow | undefined;
+    for (let attempt = 1; !incident; attempt++) {
+      const key = await this.incidents.nextKey(input.organizationId, input.keyPrefix);
+      try {
+        incident = await this.incidents.create({
+          organizationId: input.organizationId,
+          serviceId: input.serviceId,
+          key,
+          title: input.title,
+          severity: input.severity,
+          state: 'INCIDENT_OPEN',
+          suspectedDeploymentId: input.suspectedDeploymentId ?? null,
+          // Deliberately null. A deployment being suspected is not an attribution, and
+          // leaving this unset until Phase 3 produces evidence is the whole point.
+          deploymentAttribution: null,
+        });
+      } catch (err) {
+        if (!isUniqueViolation(err) || attempt >= KEY_ATTEMPTS) throw err;
+      }
+    }
+    if (!incident) throw new Error('no incident key could be allocated');
 
     await this.timeline.append({
       incidentId: incident.id,
@@ -79,25 +101,43 @@ export class IncidentEngine {
 
   /** Apply a state transition, or throw and audit the refusal. */
   async transition(incidentId: string, input: TransitionInput): Promise<IncidentRow> {
-    const incident = await this.incidents.byId(incidentId);
+    const outcome = this.unitOfWork
+      ? await this.unitOfWork((repos) => this.applyTransition(repos, incidentId, input, true))
+      : await this.applyTransition(
+          { incidents: this.incidents, timeline: this.timeline, audit: this.audit },
+          incidentId,
+          input,
+          false,
+        );
+    // Thrown only after the transaction commits, so the audited refusal is kept.
+    if ('refused' in outcome) throw outcome.refused;
+    return outcome.updated;
+  }
+
+  private async applyTransition(
+    repos: IncidentRepositories,
+    incidentId: string,
+    input: TransitionInput,
+    locked: boolean,
+  ): Promise<{ updated: IncidentRow } | { refused: InvalidTransitionError }> {
+    const incident = locked ? await repos.incidents.byIdForUpdate(incidentId) : await repos.incidents.byId(incidentId);
     if (!incident) throw new Error(`Unknown incident ${incidentId}`);
 
     const from = incident.state as IncidentState;
     try {
       assertTransition(from, input.to);
     } catch (err) {
-      if (err instanceof InvalidTransitionError) {
-        await this.audit.record({
-          organizationId: incident.organizationId,
-          incidentId,
-          actor: input.actor ?? 'system',
-          action: `incident.transition:${from}->${input.to}`,
-          allowed: false,
-          denialReason: err.message,
-          detail: { summary: input.summary },
-        });
-      }
-      throw err;
+      if (!(err instanceof InvalidTransitionError)) throw err;
+      await repos.audit.record({
+        organizationId: incident.organizationId,
+        incidentId,
+        actor: input.actor ?? 'system',
+        action: `incident.transition:${from}->${input.to}`,
+        allowed: false,
+        denialReason: err.message,
+        detail: { summary: input.summary },
+      });
+      return { refused: err };
     }
 
     const patch: Parameters<IncidentRepository['update']>[1] = { state: input.to };
@@ -105,9 +145,9 @@ export class IncidentEngine {
     // resolution timestamp can be set.
     if (input.to === 'RESOLVED') patch.resolvedAt = new Date();
 
-    const updated = await this.incidents.update(incidentId, patch);
+    const updated = await repos.incidents.update(incidentId, patch);
 
-    await this.timeline.append({
+    await repos.timeline.append({
       incidentId,
       kind: 'state_changed',
       summary: input.summary,
@@ -117,7 +157,7 @@ export class IncidentEngine {
       detail: input.detail ?? null,
     });
 
-    await this.audit.record({
+    await repos.audit.record({
       organizationId: incident.organizationId,
       incidentId,
       actor: input.actor ?? 'system',
@@ -126,7 +166,7 @@ export class IncidentEngine {
       detail: { summary: input.summary },
     });
 
-    return updated;
+    return { updated };
   }
 
   /** Record something that happened without changing state. */

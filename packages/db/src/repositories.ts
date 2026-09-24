@@ -52,6 +52,12 @@ export class IncidentRepository {
     return row ?? null;
   }
 
+  /** The incident, row-locked until the surrounding transaction ends. */
+  async byIdForUpdate(id: string): Promise<IncidentRow | null> {
+    const [row] = await this.db.select().from(incidents).where(eq(incidents.id, id)).limit(1).for('update');
+    return row ?? null;
+  }
+
   async byKey(organizationId: string, key: string): Promise<IncidentRow | null> {
     const [row] = await this.db
       .select()
@@ -418,4 +424,40 @@ export class FixRepository {
       }),
     );
   }
+}
+
+export interface IncidentRepositories {
+  incidents: IncidentRepository;
+  timeline: TimelineRepository;
+  audit: AuditRepository;
+}
+
+/** Runs work against the incident tables inside one transaction. */
+export type IncidentUnitOfWork = <T>(work: (repos: IncidentRepositories) => Promise<T>) => Promise<T>;
+
+/**
+ * A unit of work over one database transaction, for the incident engine.
+ *
+ * A state change reads the current state, validates, updates the row and writes
+ * the timeline and audit entries. Done as separate statements, two concurrent
+ * transitions can both validate against the same old state; done in one
+ * transaction with the row locked, the second waits and then sees the first.
+ */
+export function incidentUnitOfWork(db: Database): IncidentUnitOfWork {
+  return (work) =>
+    (db as unknown as { transaction: <T>(fn: (tx: Database) => Promise<T>) => Promise<T> }).transaction((tx) =>
+      work({
+        incidents: new IncidentRepository(tx),
+        timeline: new TimelineRepository(tx),
+        audit: new AuditRepository(tx),
+      }),
+    );
+}
+
+/** True for Postgres' unique-violation error, however the driver wraps it. */
+export function isUniqueViolation(err: unknown): boolean {
+  for (let e: unknown = err; e && typeof e === 'object'; e = (e as { cause?: unknown }).cause) {
+    if ((e as { code?: unknown }).code === '23505') return true;
+  }
+  return false;
 }
