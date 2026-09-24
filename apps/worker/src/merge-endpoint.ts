@@ -41,6 +41,8 @@ export interface MergeEndpointDeps {
   /** The operator's standing grant. Merging refuses below L4. */
   autonomy: AutonomyLevel;
   repository: string;
+  /** Only these people, in this workspace (and channel, when set), may merge. */
+  approvers: { teamId: string; userIds: readonly string[]; channelId: string | null };
   sourceControl: SourceControlProvider;
   /** Recorded approvals, newest first. Shown on the dashboard. */
   approvals: MergeApproval[];
@@ -146,6 +148,25 @@ export async function handleSlackInteraction(
     return;
   }
 
+  // 3b. Who is asking. The signature proves Slack sent this; it does not prove the
+  //     person may merge — anyone in the workspace can see the message. So the click
+  //     counts only from the configured workspace, channel and named approvers.
+  const teamId = interaction.team?.id ?? interaction.user?.team_id;
+  const userId = interaction.user?.id;
+  const refusal =
+    teamId !== deps.approvers.teamId
+      ? `workspace ${teamId ?? 'unknown'} is not the one this worker serves`
+      : deps.approvers.channelId && interaction.channel?.id !== deps.approvers.channelId
+        ? `the button was pressed outside the incident channel`
+        : !userId || !deps.approvers.userIds.includes(userId)
+          ? `${userId ?? 'an unknown user'} is not an approver for this worker`
+          : null;
+  if (refusal) {
+    deps.log(`REFUSED a merge of ${target.repository}#${target.pullRequest}: ${refusal}`);
+    reply(response, 200, `:no_entry: Not merged: ${refusal}.`);
+    return;
+  }
+
   const approvedBy = interaction.user?.username ?? interaction.user?.name ?? interaction.user?.id ?? 'unknown';
   const approval: MergeApproval = {
     id: randomUUID(),
@@ -176,7 +197,14 @@ export async function handleSlackInteraction(
       return;
     }
   } catch (err) {
-    deps.log(`could not read #${target.pullRequest}: ${err instanceof Error ? err.message : String(err)}`);
+    // Fail closed. Without knowing the pull request's current state, merging could
+    // act on something already closed or reopened with new commits.
+    const message = err instanceof Error ? err.message : String(err);
+    approval.outcome = `refused: could not read the pull request (${message})`;
+    deps.approvals.unshift(approval);
+    deps.log(`REFUSED merging #${target.pullRequest}: could not read its state: ${message}`);
+    reply(response, 200, `:warning: Not merged: could not confirm the current state of #${target.pullRequest}. Try again, or merge on GitHub.`);
+    return;
   }
 
   // 5. Authorise. The autonomy level is the operator's standing grant and the

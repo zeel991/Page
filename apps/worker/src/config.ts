@@ -42,6 +42,19 @@ export interface WorkerConfig {
   mergeButton: boolean;
   slackSigningSecret: string;
   /**
+   * Who may press the merge button. A valid Slack signature proves the click came
+   * from Slack, not that the person clicking may merge: anyone in the workspace can
+   * see the message. So the button is honoured only from this workspace, from these
+   * Slack user ids, and — when set — in this channel.
+   */
+  mergeApprovers: { teamId: string; userIds: string[]; channelId: string | null };
+  /**
+   * Let the health probe reach private addresses and plain http. Only for local
+   * drills against a service on this machine; a hosted worker must never set it,
+   * because the health URL is exactly the input an SSRF attack would supply.
+   */
+  allowPrivateHealthUrl: boolean;
+  /**
    * The operator's standing decision about what this worker may do at all.
    *
    * Read from configuration rather than assumed, because merging asserts against it
@@ -57,6 +70,29 @@ export interface WorkerConfig {
    */
   notion: { token: string; parentPageId: string } | null;
   email: { apiKey: string; from: string; to: string[] } | null;
+}
+
+export const MIN_INTERVAL_SECONDS = 15;
+export const MAX_INTERVAL_SECONDS = 3600;
+
+/** Datadog's API hosts, one per site. Keys are never sent anywhere else. */
+export const DATADOG_API_HOSTS: ReadonlySet<string> = new Set([
+  'api.datadoghq.com',
+  'api.us3.datadoghq.com',
+  'api.us5.datadoghq.com',
+  'api.datadoghq.eu',
+  'api.ap1.datadoghq.com',
+  'api.ap2.datadoghq.com',
+  'api.ddog-gov.com',
+]);
+
+function safeHost(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' ? parsed.host : '';
+  } catch {
+    return '';
+  }
 }
 
 export class WorkerConfigError extends Error {
@@ -94,11 +130,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     slackToken: required(env, 'SLACK_BOT_TOKEN', missing),
     anthropicKey: required(env, 'ANTHROPIC_API_KEY', missing),
     model: env.PAGER_MODEL?.trim() || 'claude-opus-5',
-    intervalSeconds: Number(env.PAGER_INTERVAL_SECONDS ?? 60),
+    intervalSeconds: Number(env.PAGER_INTERVAL_SECONDS?.trim() || 60),
     once: env.PAGER_WORKER_ONCE === '1',
     readOnly: env.PAGER_READ_ONLY === '1',
     mergeButton: env.PAGER_ENABLE_MERGE_BUTTON === '1' && Boolean(env.SLACK_SIGNING_SECRET?.trim()),
     slackSigningSecret: env.SLACK_SIGNING_SECRET?.trim() ?? '',
+    mergeApprovers: {
+      teamId: env.PAGER_SLACK_TEAM_ID?.trim() ?? '',
+      userIds: (env.PAGER_MERGE_APPROVERS ?? '').split(',').map((id) => id.trim()).filter(Boolean),
+      channelId: env.PAGER_SLACK_CHANNEL_ID?.trim() || null,
+    },
+    allowPrivateHealthUrl: env.PAGER_ALLOW_PRIVATE_HEALTH_URL === '1',
     autonomy: (env.PAGER_AUTONOMY_LEVEL?.trim() || 'L3') as AutonomyLevel,
     notion:
       env.NOTION_TOKEN?.trim() && env.NOTION_PARENT_PAGE_ID?.trim()
@@ -125,6 +167,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
 
   if (!(AUTONOMY_LEVELS as readonly string[]).includes(config.autonomy)) {
     missing.push(`PAGER_AUTONOMY_LEVEL (got "${config.autonomy}", expected one of ${AUTONOMY_LEVELS.join(', ')})`);
+  } else if (AUTONOMY_LEVELS.indexOf(config.autonomy) < AUTONOMY_LEVELS.indexOf('L2')) {
+    // The workflow posts to Slack, which needs L2. Below that it would fail at the
+    // first write of every incident; say so now instead.
+    missing.push(`PAGER_AUTONOMY_LEVEL (got "${config.autonomy}"; this worker needs at least L2 to report to Slack)`);
+  }
+
+  // A non-numeric or tiny interval turns the loop into a tight one that hammers
+  // Datadog, GitHub and the model.
+  if (!Number.isInteger(config.intervalSeconds) || config.intervalSeconds < MIN_INTERVAL_SECONDS || config.intervalSeconds > MAX_INTERVAL_SECONDS) {
+    missing.push(
+      `PAGER_INTERVAL_SECONDS (got "${env.PAGER_INTERVAL_SECONDS}", expected a whole number of seconds between ${MIN_INTERVAL_SECONDS} and ${MAX_INTERVAL_SECONDS})`,
+    );
+  }
+
+  // The Datadog keys are sent to this host, so it must be one of Datadog's own.
+  if (!DATADOG_API_HOSTS.has(safeHost(config.datadog.baseUrl))) {
+    missing.push(`DATADOG_BASE_URL (got "${config.datadog.baseUrl}", expected a Datadog API site such as https://api.datadoghq.eu)`);
+  }
+
+  if (!/^https?:\/\//.test(config.healthUrl) && config.healthUrl) {
+    missing.push(`PAGER_HEALTH_URL (got "${config.healthUrl}", expected an http(s) URL)`);
+  }
+
+  if (config.mergeButton) {
+    if (!config.mergeApprovers.teamId) missing.push('PAGER_SLACK_TEAM_ID (required by PAGER_ENABLE_MERGE_BUTTON)');
+    if (config.mergeApprovers.userIds.length === 0) {
+      missing.push('PAGER_MERGE_APPROVERS (Slack user ids allowed to merge; required by PAGER_ENABLE_MERGE_BUTTON)');
+    }
   }
 
   // Say so rather than failing silently: asking for the button without the secret
@@ -143,7 +213,7 @@ export function describeConfig(config: WorkerConfig): string {
   return [
     `service        ${config.service}`,
     `repository     ${config.repository} (${config.baseBranch})`,
-    `health         ${config.healthUrl}`,
+    `health         ${config.healthUrl}${config.allowPrivateHealthUrl ? ' (PRIVATE ADDRESSES ALLOWED — local drills only)' : ''}`,
     `datadog        ${config.datadog.baseUrl}`,
     `slack          ${config.slackChannel}`,
     `model          ${config.model}`,
@@ -156,7 +226,7 @@ export function describeConfig(config: WorkerConfig): string {
       !config.mergeButton
         ? 'off — merging happens on GitHub'
         : config.autonomy === 'L4' || config.autonomy === 'L5'
-          ? 'OFFERED — a human click merges, recorded against them'
+          ? `OFFERED — ${config.mergeApprovers.userIds.length} named approver(s) may merge, recorded against them`
           : `offered, but merging will be REFUSED at ${config.autonomy}: it needs L4`
     }`,
   ].join('\n  ');

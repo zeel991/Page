@@ -109,7 +109,8 @@ export function decodeMergeAction(value: unknown): MergeAction {
 
 export interface SlackInteraction {
   type: string;
-  user?: { id?: string; name?: string; username?: string };
+  user?: { id?: string; name?: string; username?: string; team_id?: string };
+  team?: { id?: string };
   actions?: { action_id?: string; value?: string }[];
   response_url?: string;
   message?: { ts?: string };

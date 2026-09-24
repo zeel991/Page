@@ -197,6 +197,7 @@ function serveStatus(port: number, config: WorkerConfig, sourceControl: SourceCo
         enabled: config.mergeButton,
         autonomy: config.autonomy,
         repository: config.repository,
+        approvers: config.mergeApprovers,
         sourceControl,
         approvals: status.approvals,
         log,
@@ -371,7 +372,9 @@ async function tick(config: WorkerConfig, handled: Set<string>): Promise<void> {
     }),
     // L2 prepares a fix in a sandbox but may not open a pull request; L3 may.
     // Nothing here reaches production at either level.
-    autonomy: config.readOnly ? 'L2' : 'L3',
+    // The operator's configured level governs what the workflow may write. Read-only
+    // mode caps it at L2, which can report but not open a pull request.
+    autonomy: config.readOnly ? 'L2' : config.autonomy,
   });
 
   // Settle anything a human merged since the last tick. This runs before the health
@@ -382,10 +385,25 @@ async function tick(config: WorkerConfig, handled: Set<string>): Promise<void> {
   await settleMerged(config, workflow, sourceControl);
 
   // 1. Ask the service what it is running. Everything downstream depends on this
-  //    being observed rather than assumed, so a failure here ends the tick.
-  const probe = await probeDeployedRevision(config.healthUrl);
+  //    being observed rather than assumed, so without it nothing is investigated.
+  //    But the tick still says whether production is alerting: "a monitor is red
+  //    and we cannot see what is deployed" must not look like "all quiet".
+  const probe = await probeDeployedRevision(config.healthUrl, { allowPrivate: config.allowPrivateHealthUrl });
   if (!probe.sha) {
+    let alerting: string[] = [];
+    try {
+      alerting = (await observability.listMonitors(config.service))
+        .filter((m) => m.status === 'ALERT')
+        .map((m) => m.name);
+    } catch (err) {
+      log(`could not read monitors: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    status.lastOutcome =
+      alerting.length > 0
+        ? `NOT INVESTIGATING: ${alerting.join(', ')} is alerting, but the deployed revision is unknown (${probe.problem})`
+        : `skipped: deployed revision unknown (${probe.problem})`;
     enter('idle', `Skipped: ${probe.problem}`);
+    if (alerting.length > 0) log(status.lastOutcome);
     return;
   }
   enter('checking_monitors', `Production is running ${probe.sha.slice(0, 12)}`);
