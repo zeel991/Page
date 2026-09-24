@@ -1,7 +1,9 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createDatabase } from '../src/client.js';
+import { MIGRATIONS_DIR, migrate } from '../src/migrate.js';
 import { deployments, evidence, incidents, organizations, repositories, services } from '../src/schema.js';
 
 /**
@@ -10,15 +12,10 @@ import { deployments, evidence, incidents, organizations, repositories, services
  * constraints we rely on for safety are actually enforced by the database.
  */
 
-const MIGRATIONS = join(import.meta.dirname, '..', 'migrations');
 
 async function freshDb() {
   const handle = await createDatabase('pglite://memory');
-  const file = readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()[0]!;
-  const sql = readFileSync(join(MIGRATIONS, file), 'utf8');
-  for (const stmt of sql.split('--> statement-breakpoint')) {
-    if (stmt.trim()) await handle.pglite!.exec(stmt);
-  }
+  await migrate(handle);
   return handle;
 }
 
@@ -130,5 +127,47 @@ describe('database schema', () => {
     ).rejects.toThrow();
 
     await close();
+  });
+});
+
+describe('migrations', () => {
+  const tableExists = async (h: Awaited<ReturnType<typeof createDatabase>>, name: string) =>
+    (await h.pglite!.query<{ t: string | null }>(`select to_regclass('public.${name}')::text as t`)).rows[0]!.t !== null;
+
+  // The loader this replaced ran only the first file, so this is the regression test
+  // that matters: a second migration must actually be applied.
+  it('applies every migration in the journal, not just the first', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pager-migrations-'));
+    cpSync(MIGRATIONS_DIR, dir, { recursive: true });
+    writeFileSync(join(dir, '0001_probe.sql'), 'CREATE TABLE "migration_probe" ("id" integer PRIMARY KEY);');
+    const journalPath = join(dir, 'meta', '_journal.json');
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+    journal.entries.push({ idx: 1, version: '7', when: journal.entries[0].when + 1, tag: '0001_probe', breakpoints: true });
+    writeFileSync(journalPath, JSON.stringify(journal));
+
+    const h = await createDatabase('pglite://memory');
+    await migrate(h, dir);
+    expect(await tableExists(h, 'migration_probe')).toBe(true);
+    await h.close();
+  });
+
+  it('is a no-op the second time', async () => {
+    const h = await createDatabase('pglite://memory');
+    await migrate(h);
+    await migrate(h);
+    const applied = await h.pglite!.query<{ n: number }>('select count(*)::int as n from drizzle.__drizzle_migrations');
+    expect(applied.rows[0]!.n).toBe(readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).length);
+    await h.close();
+  });
+
+  it('adopts a database created by the old first-file loader', async () => {
+    const h = await createDatabase('pglite://memory');
+    const first = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort()[0]!;
+    for (const stmt of readFileSync(join(MIGRATIONS_DIR, first), 'utf8').split('--> statement-breakpoint')) {
+      if (stmt.trim()) await h.pglite!.exec(stmt);
+    }
+    await expect(migrate(h)).resolves.toBeUndefined();
+    expect(await tableExists(h, 'organizations')).toBe(true);
+    await h.close();
   });
 });

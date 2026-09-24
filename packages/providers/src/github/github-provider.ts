@@ -81,6 +81,43 @@ const FILE_STATUS: Record<string, ChangedFile['status']> = {
   changed: 'modified',
 };
 
+
+/**
+ * URL-building for repository paths.
+ *
+ * Several of these values are chosen by a model — a file path to read, a ref to
+ * inspect — and interpolating them raw lets `../` walk out of the repository into
+ * any other `/repos/...` the token can see. Each value is validated and encoded,
+ * so a path can only ever name something inside the repository it was asked about.
+ */
+export class UnsafeRepositoryPathError extends Error {
+  constructor(what: string, value: string) {
+    super(`Refusing unsafe ${what}: ${JSON.stringify(value)}`);
+    this.name = 'UnsafeRepositoryPathError';
+  }
+}
+
+const REPO_PART = /^[A-Za-z0-9_.-]+$/;
+
+export function repoPath(repo: string): string {
+  const parts = repo.split('/');
+  if (parts.length !== 2 || parts.some((p) => !REPO_PART.test(p) || p === '.' || p === '..')) {
+    throw new UnsafeRepositoryPathError('repository', repo);
+  }
+  return parts.map(encodeURIComponent).join('/');
+}
+
+export function segment(value: string): string {
+  if (value === '' || value === '.' || value === '..') throw new UnsafeRepositoryPathError('path segment', value);
+  return encodeURIComponent(value);
+}
+
+export function refPath(path: string): string {
+  const parts = path.replace(/^\/+/, '').split('/');
+  if (parts.some((p) => p === '' || p === '.' || p === '..')) throw new UnsafeRepositoryPathError('path', path);
+  return parts.map(encodeURIComponent).join('/');
+}
+
 export interface GitHubProviderOptions {
   baseUrl: string;
   token?: string;
@@ -132,7 +169,7 @@ export class GitHubProvider implements SourceControlProvider {
   }
 
   async getCommit(repo: string, sha: string): Promise<Commit> {
-    const res = await this.http.get<GhCommitResponse>(`/repos/${repo}/commits/${sha}`);
+    const res = await this.http.get<GhCommitResponse>(`/repos/${repoPath(repo)}/commits/${segment(sha)}`);
     return toCommit(res);
   }
 
@@ -152,7 +189,7 @@ export class GitHubProvider implements SourceControlProvider {
    */
   async getDiff(repo: string, baseSha: string, headSha: string): Promise<Diff> {
     const res = await this.http.get<GhCompareResponse>(
-      `/repos/${repo}/compare/${baseSha}...${headSha}`,
+      `/repos/${repoPath(repo)}/compare/${segment(baseSha)}...${segment(headSha)}`,
     );
     const files = res.files ?? [];
 
@@ -181,7 +218,7 @@ export class GitHubProvider implements SourceControlProvider {
 
   async listCommitsBetween(repo: string, baseSha: string, headSha: string): Promise<Commit[]> {
     const res = await this.http.get<GhCompareResponse>(
-      `/repos/${repo}/compare/${baseSha}...${headSha}`,
+      `/repos/${repoPath(repo)}/compare/${segment(baseSha)}...${segment(headSha)}`,
     );
     return (res.commits ?? []).map(toCommit);
   }
@@ -189,7 +226,7 @@ export class GitHubProvider implements SourceControlProvider {
   /** Recursive tree for a revision, as a path -> blob sha map. */
   private async treeMap(repo: string, sha: string): Promise<Map<string, string>> {
     const res = await this.http.getOptional<GhTreeResponse>(
-      `/repos/${repo}/git/trees/${sha}`,
+      `/repos/${repoPath(repo)}/git/trees/${segment(sha)}`,
       { recursive: 1 },
     );
     const map = new Map<string, string>();
@@ -225,7 +262,7 @@ export class GitHubProvider implements SourceControlProvider {
   }
 
   async listCommits(repo: string, opts: { ref?: string; limit?: number } = {}): Promise<Commit[]> {
-    const res = await this.http.get<GhCommitResponse[]>(`/repos/${repo}/commits`, {
+    const res = await this.http.get<GhCommitResponse[]>(`/repos/${repoPath(repo)}/commits`, {
       ...(opts.ref ? { sha: opts.ref } : {}),
       per_page: opts.limit ?? 30,
     });
@@ -233,7 +270,7 @@ export class GitHubProvider implements SourceControlProvider {
   }
 
   async getPullRequest(repo: string, number: number): Promise<PullRequest> {
-    const res = await this.http.get<GhPullRequest>(`/repos/${repo}/pulls/${number}`);
+    const res = await this.http.get<GhPullRequest>(`/repos/${repoPath(repo)}/pulls/${segment(String(number))}`);
     return toPullRequest(res);
   }
 
@@ -247,11 +284,11 @@ export class GitHubProvider implements SourceControlProvider {
    */
   async listPullRequestsForCommit(repo: string, sha: string): Promise<PullRequest[]> {
     const direct = await this.http.getOptional<GhPullRequest[]>(
-      `/repos/${repo}/commits/${sha}/pulls`,
+      `/repos/${repoPath(repo)}/commits/${segment(sha)}/pulls`,
     );
     if (direct && direct.length > 0) return direct.map(toPullRequest);
 
-    const all = await this.http.getOptional<GhPullRequest[]>(`/repos/${repo}/pulls`, {
+    const all = await this.http.getOptional<GhPullRequest[]>(`/repos/${repoPath(repo)}/pulls`, {
       state: 'all',
       per_page: 100,
     });
@@ -262,7 +299,7 @@ export class GitHubProvider implements SourceControlProvider {
 
   async getFile(repo: string, ref: string, path: string): Promise<string | null> {
     const res = await this.http.getOptional<{ content?: string; encoding?: string }>(
-      `/repos/${repo}/contents/${path}`,
+      `/repos/${repoPath(repo)}/contents/${refPath(path)}`,
       { ref },
     );
     if (!res?.content) return null;
@@ -272,7 +309,7 @@ export class GitHubProvider implements SourceControlProvider {
   }
 
   async listFiles(repo: string, ref: string): Promise<string[]> {
-    const res = await this.http.getOptional<GhTreeResponse>(`/repos/${repo}/git/trees/${ref}`, {
+    const res = await this.http.getOptional<GhTreeResponse>(`/repos/${repoPath(repo)}/git/trees/${segment(ref)}`, {
       recursive: 1,
     });
     return (res?.tree ?? []).filter((e) => e.type === 'blob').map((e) => e.path).sort();
@@ -280,7 +317,7 @@ export class GitHubProvider implements SourceControlProvider {
 
   async createBranch(repo: string, fromSha: string, name: string): Promise<Branch> {
     const res = await this.http.post<{ ref: string; object: { sha: string } }>(
-      `/repos/${repo}/git/refs`,
+      `/repos/${repoPath(repo)}/git/refs`,
       { ref: `refs/heads/${name}`, sha: fromSha },
     );
     return { name: res.ref.replace(/^refs\/heads\//, ''), sha: res.object.sha };
@@ -300,7 +337,7 @@ export class GitHubProvider implements SourceControlProvider {
     opts: { method?: 'merge' | 'squash' | 'rebase'; commitTitle?: string } = {},
   ): Promise<PullRequest> {
     await this.http.put<{ merged: boolean; sha?: string; message?: string }>(
-      `/repos/${repo}/pulls/${number}/merge`,
+      `/repos/${repoPath(repo)}/pulls/${segment(String(number))}/merge`,
       {
         merge_method: opts.method ?? 'squash',
         ...(opts.commitTitle ? { commit_title: opts.commitTitle } : {}),
@@ -313,13 +350,13 @@ export class GitHubProvider implements SourceControlProvider {
 
   async getBranch(repo: string, name: string): Promise<Branch | null> {
     const res = await this.http.getOptional<{ ref: string; object: { sha: string } }>(
-      `/repos/${repo}/git/ref/heads/${name}`,
+      `/repos/${repoPath(repo)}/git/ref/heads/${refPath(name)}`,
     );
     return res ? { name: res.ref.replace(/^refs\/heads\//, ''), sha: res.object.sha } : null;
   }
 
   async createPullRequest(repo: string, input: CreatePullRequestInput): Promise<PullRequest> {
-    const res = await this.http.post<GhPullRequest>(`/repos/${repo}/pulls`, {
+    const res = await this.http.post<GhPullRequest>(`/repos/${repoPath(repo)}/pulls`, {
       title: input.title,
       body: input.body,
       head: input.headRef,
@@ -339,11 +376,11 @@ export class GitHubProvider implements SourceControlProvider {
    */
   async commitFiles(repo: string, input: CommitFilesInput): Promise<Commit> {
     const ref = await this.http.get<{ object: { sha: string } }>(
-      `/repos/${repo}/git/ref/heads/${input.branch}`,
+      `/repos/${repoPath(repo)}/git/ref/heads/${refPath(input.branch)}`,
     );
     const parentSha = ref.object.sha;
     const parentCommit = await this.http.get<{ tree: { sha: string } }>(
-      `/repos/${repo}/git/commits/${parentSha}`,
+      `/repos/${repoPath(repo)}/git/commits/${segment(parentSha)}`,
     );
 
     const tree: Record<string, unknown>[] = [];
@@ -353,26 +390,26 @@ export class GitHubProvider implements SourceControlProvider {
         tree.push({ path: change.path, mode: '100644', type: 'blob', sha: null });
         continue;
       }
-      const blob = await this.http.post<{ sha: string }>(`/repos/${repo}/git/blobs`, {
+      const blob = await this.http.post<{ sha: string }>(`/repos/${repoPath(repo)}/git/blobs`, {
         content: Buffer.from(change.content, 'utf8').toString('base64'),
         encoding: 'base64',
       });
       tree.push({ path: change.path, mode: '100644', type: 'blob', sha: blob.sha });
     }
 
-    const newTree = await this.http.post<{ sha: string }>(`/repos/${repo}/git/trees`, {
+    const newTree = await this.http.post<{ sha: string }>(`/repos/${repoPath(repo)}/git/trees`, {
       base_tree: parentCommit.tree.sha,
       tree,
     });
 
-    const commit = await this.http.post<GhCommitResponse>(`/repos/${repo}/git/commits`, {
+    const commit = await this.http.post<GhCommitResponse>(`/repos/${repoPath(repo)}/git/commits`, {
       message: input.message,
       tree: newTree.sha,
       parents: [parentSha],
       ...(input.author ? { author: { name: input.author, email: `${input.author}@pager.local` } } : {}),
     });
 
-    await this.http.patch(`/repos/${repo}/git/refs/heads/${input.branch}`, {
+    await this.http.patch(`/repos/${repoPath(repo)}/git/refs/heads/${refPath(input.branch)}`, {
       sha: commit.sha,
       force: false,
     });
@@ -391,8 +428,9 @@ export class GitHubProvider implements SourceControlProvider {
     const url = new URL(this.baseUrl);
     // api.github.com/repos/... is served from github.com for git operations.
     const host = url.host.startsWith('api.') ? url.host.slice(4) : url.host;
-    const auth = this.token ? `${encodeURIComponent(this.token)}@` : '';
-    return `${url.protocol}//${auth}${host}/${repo}.git`;
+    // GitHub accepts installation tokens only with the x-access-token username.
+    const auth = this.token ? `x-access-token:${encodeURIComponent(this.token)}@` : '';
+    return `${url.protocol}//${auth}${host}/${repoPath(repo)}.git`;
   }
 }
 

@@ -159,14 +159,24 @@ interface TokenResponse {
   permissions?: Record<string, string>;
 }
 
+/** The app's installations do not identify one unambiguously, so no token is minted. */
+export class InstallationResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InstallationResolutionError';
+  }
+}
+
 /**
- * Mints and caches installation access tokens for one GitHub App.
+ * Mints and caches installation access tokens for one installation of a GitHub App.
  *
- * A single installation is resolved once and reused. When the app reports no
- * installations — which a freshly registered twin app does, while still accepting
- * token requests for the pre-seeded installation — `defaultInstallationId` is used
- * rather than failing, because refusing here would block the whole workflow on a
- * listing endpoint that is not load-bearing.
+ * The installation should be named with `installationId`. A token belongs to one
+ * customer's installation, and minting it for the wrong one hands that customer's
+ * repositories to someone else's job. So without an explicit id the source resolves
+ * one only when the app has exactly one installation; several is refused rather
+ * than guessed. `defaultInstallationId` covers an app that lists none — a freshly
+ * registered twin does, while still accepting token requests — and applies only
+ * when the caller supplies it.
  */
 export class GitHubAppTokenSource {
   private cached: InstallationToken | null = null;
@@ -178,10 +188,12 @@ export class GitHubAppTokenSource {
     private readonly opts: {
       fetchImpl?: typeof globalThis.fetch;
       now?: () => Date;
+      installationId?: number;
       defaultInstallationId?: number;
     } = {},
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.installationId = opts.installationId ?? null;
   }
 
   private get fetchImpl(): typeof globalThis.fetch {
@@ -198,15 +210,24 @@ export class GitHubAppTokenSource {
     const res = await this.fetchImpl(`${this.baseUrl}/app/installations`, {
       headers: { authorization: `Bearer ${jwt}`, accept: 'application/json' },
     });
-    if (res.ok) {
-      const list = (await res.json()) as InstallationResponse[];
-      if (Array.isArray(list) && list.length > 0 && list[0]) {
-        this.installationId = list[0].id;
-        return this.installationId;
-      }
+    if (!res.ok) {
+      throw new ProviderHttpError(res.status, 'GET', `${this.baseUrl}/app/installations`, await res.text());
     }
-    this.installationId = this.opts.defaultInstallationId ?? 1;
-    return this.installationId;
+    const list = (await res.json()) as InstallationResponse[];
+    const installations = Array.isArray(list) ? list : [];
+    if (installations.length === 1 && installations[0]) {
+      this.installationId = installations[0].id;
+      return this.installationId;
+    }
+    if (installations.length === 0 && this.opts.defaultInstallationId !== undefined) {
+      this.installationId = this.opts.defaultInstallationId;
+      return this.installationId;
+    }
+    throw new InstallationResolutionError(
+      installations.length === 0
+        ? 'The GitHub App has no installations and no default installation was given.'
+        : `The GitHub App has ${installations.length} installations; name the one to use with installationId.`,
+    );
   }
 
   /** A valid installation token, reminted when the cached one is near expiry. */

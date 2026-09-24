@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GitHubProvider } from '../src/github/github-provider.js';
+import { GitHubProvider, UnsafeRepositoryPathError } from '../src/github/github-provider.js';
 import { ProviderHttpError } from '../src/http.js';
 
 type Route = (url: string, init: RequestInit) => { status?: number; body?: unknown } | undefined;
@@ -153,10 +153,10 @@ describe('GitHubProvider', () => {
   it('derives a git clone url from the api base url', async () => {
     const { fetchImpl } = stubFetch([]);
     const twin = new GitHubProvider({ baseUrl: 'https://pub-r1--github.arga.test', token: 'tok', fetchImpl });
-    expect(twin.cloneUrl('acme/checkout-api')).toBe('https://tok@pub-r1--github.arga.test/acme/checkout-api.git');
+    expect(twin.cloneUrl('acme/checkout-api')).toBe('https://x-access-token:tok@pub-r1--github.arga.test/acme/checkout-api.git');
 
     const real = new GitHubProvider({ baseUrl: 'https://api.github.com', token: 'tok', fetchImpl });
-    expect(real.cloneUrl('acme/checkout-api')).toBe('https://tok@github.com/acme/checkout-api.git');
+    expect(real.cloneUrl('acme/checkout-api')).toBe('https://x-access-token:tok@github.com/acme/checkout-api.git');
   });
 });
 
@@ -275,5 +275,32 @@ describe('GitHubProvider.getBranch', () => {
     const { fetchImpl } = stubFetch([]);
     const gh = new GitHubProvider({ baseUrl: 'https://api.github.com', token: 't', fetchImpl });
     expect(await gh.getBranch('acme/checkout-api', 'pager/never-created')).toBeNull();
+  });
+});
+
+// A model chooses which file to read. It must never be able to read outside the
+// repository it was asked about.
+describe('GitHubProvider path safety', () => {
+  const gh = () => {
+    const stub = stubFetch([(url) => (url.includes('/contents/') ? { body: { content: '', encoding: 'base64' } } : null)]);
+    return { gh: new GitHubProvider({ baseUrl: 'https://api.github.com', token: 't', fetchImpl: stub.fetchImpl }), seen: stub.seen };
+  };
+
+  it('refuses a path that climbs out of the repository', async () => {
+    const { gh: p, seen } = gh();
+    await expect(p.getFile('acme/api', 'main', '../../other/secret/contents/.env')).rejects.toThrow(UnsafeRepositoryPathError);
+    await expect(p.getFile('acme/api', 'main', 'src/./x.ts')).rejects.toThrow(UnsafeRepositoryPathError);
+    expect(seen).toEqual([]);
+  });
+
+  it('encodes each segment of an ordinary path', async () => {
+    const { gh: p, seen } = gh();
+    await p.getFile('acme/api', 'main', 'src/a b/#x.ts');
+    expect(seen[0]).toContain('/repos/acme/api/contents/src/a%20b/%23x.ts');
+  });
+
+  it('refuses a malformed repository name', async () => {
+    const { gh: p } = gh();
+    await expect(p.getFile('acme/api/../../x', 'main', 'a.ts')).rejects.toThrow(UnsafeRepositoryPathError);
   });
 });

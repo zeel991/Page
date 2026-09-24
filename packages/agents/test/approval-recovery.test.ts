@@ -1,14 +1,11 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { ToolDefinition } from '@pager/core';
-import { AuditRepository, createDatabase, organizations, type DatabaseHandle } from '@pager/db';
+import { AuditRepository, createDatabase, migrate, organizations, type DatabaseHandle } from '@pager/db';
 import { AgentTracer, InMemorySink } from '@pager/observability';
 import { PolicyEngine, formatApprovalRequest, type ApprovalRecord } from '../src/approval.js';
 import { RecoveryVerifier, compareRecovery } from '../src/recovery.js';
 
-const MIGRATIONS = join(import.meta.dirname, '..', '..', 'db', 'migrations');
 
 let handle: DatabaseHandle;
 let audit: AuditRepository;
@@ -19,10 +16,7 @@ const NOW = new Date('2026-09-13T15:00:00Z');
 
 beforeEach(async () => {
   handle = await createDatabase('pglite://memory');
-  const file = readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()[0]!;
-  for (const stmt of readFileSync(join(MIGRATIONS, file), 'utf8').split('--> statement-breakpoint')) {
-    if (stmt.trim()) await handle.pglite!.exec(stmt);
-  }
+  await migrate(handle);
   const [org] = await handle.db.insert(organizations).values({ name: 'Acme', slug: 'acme' }).returning();
   orgId = org!.id;
   audit = new AuditRepository(handle.db);

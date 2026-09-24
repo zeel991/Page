@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   GitHubAppAuthError,
   GitHubAppTokenSource,
+  InstallationResolutionError,
   registerViaManifest,
   signAppJwt,
 } from '../src/github/app-auth.js';
@@ -69,7 +70,15 @@ describe('registerViaManifest', () => {
 });
 
 describe('GitHubAppTokenSource', () => {
-  function source(opts: { installations?: unknown; expiresAt?: string; now?: () => Date } = {}) {
+  function source(
+    opts: {
+      installations?: unknown;
+      expiresAt?: string;
+      now?: () => Date;
+      installationId?: number;
+      defaultInstallationId?: number;
+    } = {},
+  ) {
     let mints = 0;
     const fetchImpl = (async (url: string) => {
       if (String(url).endsWith('/app/installations')) {
@@ -93,6 +102,8 @@ describe('GitHubAppTokenSource', () => {
       src: new GitHubAppTokenSource('https://twin.test', creds, {
         fetchImpl,
         now: opts.now ?? (() => new Date('2026-09-13T14:31:00Z')),
+        ...(opts.installationId !== undefined ? { installationId: opts.installationId } : {}),
+        ...(opts.defaultInstallationId !== undefined ? { defaultInstallationId: opts.defaultInstallationId } : {}),
       }),
       mintCount: () => mints,
     };
@@ -131,9 +142,27 @@ describe('GitHubAppTokenSource', () => {
     expect(mintCount()).toBe(1);
   });
 
-  it('falls back to the default installation when the listing is empty', async () => {
-    const { src } = source({ installations: [] });
-    expect(await src.resolveInstallationId()).toBe(1);
+  it('falls back to a default installation only when one is given', async () => {
+    const { src } = source({ installations: [], defaultInstallationId: 7 });
+    expect(await src.resolveInstallationId()).toBe(7);
     expect(await src.token()).toBe('ghs_token_1');
+  });
+
+  it('refuses an empty listing when no default is given', async () => {
+    const { src, mintCount } = source({ installations: [] });
+    await expect(src.token()).rejects.toThrow(InstallationResolutionError);
+    expect(mintCount()).toBe(0);
+  });
+
+  // One customer's token must never be minted for another customer's job.
+  it('refuses to guess among several installations', async () => {
+    const { src, mintCount } = source({ installations: [{ id: 11 }, { id: 22 }] });
+    await expect(src.token()).rejects.toThrow(/2 installations/);
+    expect(mintCount()).toBe(0);
+  });
+
+  it('uses the named installation without listing', async () => {
+    const { src } = source({ installations: [{ id: 11 }, { id: 22 }], installationId: 22 });
+    expect(await src.resolveInstallationId()).toBe(22);
   });
 });

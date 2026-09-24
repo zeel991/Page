@@ -1,5 +1,3 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { InvalidTransitionError } from '@pager/core';
 import {
@@ -11,6 +9,7 @@ import {
   repositories as reposTable,
   services,
   type DatabaseHandle,
+  migrate,
 } from '@pager/db';
 import { IncidentEngine } from '../src/incident-engine.js';
 
@@ -18,7 +17,6 @@ import { IncidentEngine } from '../src/incident-engine.js';
  * Runs against a real Postgres engine. The state machine's guarantees only matter if
  * they hold against the actual store, including the enum constraint on the column.
  */
-const MIGRATIONS = join(import.meta.dirname, '..', '..', 'db', 'migrations');
 
 let handle: DatabaseHandle;
 let engine: IncidentEngine;
@@ -30,10 +28,7 @@ let serviceId: string;
 
 beforeEach(async () => {
   handle = await createDatabase('pglite://memory');
-  const file = readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()[0]!;
-  for (const stmt of readFileSync(join(MIGRATIONS, file), 'utf8').split('--> statement-breakpoint')) {
-    if (stmt.trim()) await handle.pglite!.exec(stmt);
-  }
+  await migrate(handle);
 
   const [org] = await handle.db.insert(organizations).values({ name: 'Acme', slug: 'acme' }).returning();
   orgId = org!.id;
