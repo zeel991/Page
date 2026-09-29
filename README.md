@@ -168,7 +168,7 @@ pnpm api              # API on http://127.0.0.1:4000
 pnpm --filter @pager/web dev   # landing page on http://127.0.0.1:4100, command centre at /dashboard
 ```
 
-`pnpm verify` — typecheck, lint, **339 tests**, build — must pass before any commit.
+`pnpm verify` — typecheck, lint, **510 tests** in 38 files, build — must pass before any commit.
 
 A reasoning model is optional. Without one the system still detects, files, notifies,
 reproduces and hands off; it simply never claims to have diagnosed anything.
@@ -193,6 +193,21 @@ Optional, and absent means absent rather than broken: `NOTION_TOKEN` +
 
 `PAGER_READ_ONLY=1` drops it to L2 — it investigates, reproduces and validates, but
 may not open a pull request.
+
+**Where the repository's code runs.** Reproducing a failure means executing the
+watched repository's tests, and a patch, which is untrusted code.
+`PAGER_SANDBOX_RUNNER=docker` runs each command in a container with no network,
+a read-only root, a non-root uid, CPU/memory/pid limits and the repository mounted
+at `/work` (image: `PAGER_SANDBOX_IMAGE`, default `node:22-bookworm-slim`); it needs
+a Docker daemon that can bind-mount the sandbox directory. The default, `local`, is
+**for development only**: the code runs on the worker's host as its user, with only
+the environment (an allow-list), working directory and process group contained. The
+Docker runner is unit-tested against the command it builds, but has not yet been
+run against a real Docker daemon.
+
+**The status page is unauthenticated.** `/` and `/status` show a remote reader the
+incidents and stages but not approver names or raw vendor errors; localhost, or
+`PAGER_PUBLIC_STATUS=1`, gets the full record. Credentials are redacted everywhere.
 
 **It asks the service what revision it is running**, through `PAGER_HEALTH_URL`, and
 skips the tick when the service cannot say. Every claim rests on having tested the
@@ -253,8 +268,10 @@ that talks to the local twin talks to production Datadog.
 
 The Slack merge endpoint verifies every request: HMAC-SHA256 over the raw body,
 constant-time comparison, a five-minute replay window, and a repository allow-list.
-The pull request state is re-read from GitHub before any action. Merging requires the
-configured autonomy level, and the approval is recorded against the person who
+The pull request state is re-read from GitHub before any action, and the merge is
+pinned to the commit the message described: anything pushed afterwards makes GitHub
+refuse it, and Slack is told the pull request changed since review. Merging requires
+the configured autonomy level, and the approval is recorded against the person who
 clicked — not against the agent.
 
 Repository content, logs and runbooks are treated as **data, never as instructions**.
@@ -262,5 +279,5 @@ Repository content, logs and runbooks are treated as **data, never as instructio
 ---
 
 <p align="center">
-  <sub>7 packages · 3 apps · 149 TypeScript files · 28 test suites · 339 tests</sub>
+  <sub>7 packages · 3 apps · 168 TypeScript files · 38 test files · 510 tests</sub>
 </p>
