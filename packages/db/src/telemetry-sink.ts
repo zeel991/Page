@@ -45,11 +45,19 @@ export interface SinkToolCall {
  * first. Ordering matters — a tool call is written before any evidence citing it.
  */
 export class DrizzleTelemetrySink {
-  constructor(private readonly db: Database) {}
+  /**
+   * @param scope Every run and tool call belongs to one organisation, known before
+   *   any incident exists — a watcher's run happens before there is one to join on.
+   */
+  constructor(
+    private readonly db: Database,
+    private readonly scope: { organizationId: string },
+  ) {}
 
   async startAgentRun(record: SinkAgentRun): Promise<void> {
     await this.db.insert(agentRuns).values({
       id: record.id,
+      organizationId: this.scope.organizationId,
       incidentId: record.incidentId,
       agentName: record.agentName,
       status: record.status,
@@ -78,6 +86,7 @@ export class DrizzleTelemetrySink {
   async recordToolCall(record: SinkToolCall): Promise<void> {
     await this.db.insert(toolCalls).values({
       id: record.id,
+      organizationId: this.scope.organizationId,
       agentRunId: record.agentRunId,
       incidentId: record.incidentId,
       toolName: record.toolName,

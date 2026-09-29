@@ -1,3 +1,4 @@
+import { api } from '@/lib/api';
 import { PageHeader, Panel } from '@/components/ui';
 
 export const dynamic = 'force-dynamic';
@@ -23,21 +24,53 @@ const PROHIBITED = [
   'disable security controls',
 ];
 
-export default function PoliciesPage() {
+interface PolicyRow {
+  id: string;
+  name: string;
+  description: string;
+  minAutonomy: string;
+  requiresApproval: boolean;
+  appliesToRisk: string;
+  enabled: boolean;
+}
+
+export default async function PoliciesPage() {
+  // This workspace's own rows. The levels and prohibitions below are the product's
+  // fixed rules; the autonomy level and the policies are the workspace's.
+  const { autonomyLevel, policies } = await api<{ autonomyLevel: string | null; policies: PolicyRow[] }>('/api/policies');
+  const current = autonomyLevel ?? '—';
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="What it may do, and what it never will" title="Policies" />
 
-      <Panel title="Autonomy" subtitle="current level: L3" dense>
+      <Panel title="This workspace's policies" subtitle={`${policies.length} rule(s)`} dense>
+        <table className="w-full">
+          <tbody>
+            {policies.map((p) => (
+              <tr key={p.id} className="border-b border-edge-soft last:border-0">
+                <td className="w-64 px-3 py-2 text-[12px]">{p.name}</td>
+                <td className="px-2 py-2 text-[11px] text-muted">{p.description}</td>
+                <td className="w-16 px-2 py-2 font-mono text-[10px] text-accent">{p.minAutonomy}</td>
+                <td className="w-40 px-2 py-2 font-mono text-[10px] text-dim">{p.appliesToRisk}</td>
+                <td className="w-28 px-3 py-2 text-right font-mono text-[10px]">
+                  {!p.enabled ? <span className="text-dim">NOT OFFERED</span> : p.requiresApproval ? <span className="text-sev3">APPROVAL</span> : <span className="text-ok">ALLOWED</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Panel>
+
+      <Panel title="Autonomy" subtitle={`current level: ${current}`} dense>
         <table className="w-full">
           <tbody>
             {LEVELS.map(([level, name, detail]) => (
-              <tr key={level} className={`border-b border-edge-soft last:border-0 ${level === 'L3' ? 'bg-accent/5' : ''}`}>
+              <tr key={level} className={`border-b border-edge-soft last:border-0 ${level === current ? 'bg-accent/5' : ''}`}>
                 <td className="w-12 px-3 py-2 font-mono text-[11px] text-accent">{level}</td>
                 <td className="w-64 px-2 py-2 text-[12px]">{name}</td>
                 <td className="px-2 py-2 text-[11px] text-muted">{detail}</td>
                 <td className="w-20 px-3 py-2 text-right font-mono text-[10px]">
-                  {level === 'L3' ? <span className="text-accent">ACTIVE</span> : <span className="text-dim">—</span>}
+                  {level === current ? <span className="text-accent">ACTIVE</span> : <span className="text-dim">—</span>}
                 </td>
               </tr>
             ))}

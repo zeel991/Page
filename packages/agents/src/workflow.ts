@@ -1235,6 +1235,7 @@ export class IncidentWorkflow {
             const values = call.value.points.map((pt) => pt.value);
             if (values.length === 0) continue;
             await persistence.telemetry.record({
+              organizationId: persistence.organizationId,
               serviceId: persistence.serviceId,
               metric,
               windowKind: window.kind,
@@ -1270,6 +1271,7 @@ export class IncidentWorkflow {
     alert: ProductionAlert,
   ): Promise<void> {
     await persistence.evidence.record({
+      organizationId: persistence.organizationId,
       incidentId,
       kind: 'DATADOG_MONITOR',
       provenance: 'OBSERVED',
@@ -1284,6 +1286,7 @@ export class IncidentWorkflow {
 
     const frame = cluster.topApplicationFrame;
     await persistence.evidence.record({
+      organizationId: persistence.organizationId,
       incidentId,
       kind: frame ? 'STACK_TRACE' : 'DATADOG_LOG',
       provenance: 'OBSERVED',
@@ -1378,6 +1381,7 @@ export class IncidentWorkflow {
     for (const citation of findings.evidence) {
       await persistence.evidence
         .record({
+          organizationId: persistence.organizationId,
           incidentId,
           kind: 'REPOSITORY_FILE',
           provenance: 'DERIVED',

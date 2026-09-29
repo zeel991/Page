@@ -5,6 +5,10 @@
  * one that is briefly empty, because a resolved incident that still reads as
  * burning sends people to a fire that is already out.
  */
+import { redirect } from 'next/navigation';
+import { auth } from '@/auth';
+import { sessionToken } from './api-token';
+
 const BASE = process.env.PAGER_API_URL ?? 'http://127.0.0.1:4000';
 
 export class ApiUnavailableError extends Error {
@@ -15,14 +19,32 @@ export class ApiUnavailableError extends Error {
   }
 }
 
-export async function api<T>(path: string): Promise<T> {
+/**
+ * Call the API as the signed-in member, in their workspace.
+ *
+ * Runs on the console's server. A missing session sends the person to sign in; an
+ * API that no longer recognises the membership does the same, since it means they
+ * were removed from the workspace.
+ */
+export async function api<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+  const session = await auth();
+  if (!session?.userId || !session.organizationId) redirect('/signin');
   const url = `${BASE}${path}`;
   let res: Response;
   try {
-    res = await fetch(url, { cache: 'no-store' });
+    res = await fetch(url, {
+      cache: 'no-store',
+      method: init.method ?? 'GET',
+      headers: {
+        authorization: `Bearer ${sessionToken(session.userId, session.organizationId)}`,
+        ...(init.body !== undefined ? { 'content-type': 'application/json' } : {}),
+      },
+      ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+    });
   } catch (err) {
     throw new ApiUnavailableError(url, err);
   }
+  if (res.status === 401) redirect('/signin');
   if (!res.ok) {
     if (res.status === 404) throw new Error('not-found');
     throw new Error(`${url} responded ${res.status}`);

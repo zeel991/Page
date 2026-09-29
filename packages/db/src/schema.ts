@@ -42,6 +42,8 @@ export const toolStatusEnum = pgEnum('tool_status', ['OK', 'ERROR']);
 export const approvalDecisionEnum = pgEnum('approval_decision', [
   'APPROVED', 'REJECTED', 'ROLLBACK_INSTEAD',
 ]);
+/** What a member may do in a workspace. Only owners and admins may merge from Slack. */
+export const membershipRoleEnum = pgEnum('membership_role', ['owner', 'admin', 'member']);
 
 export const organizations = pgTable('organizations', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -52,13 +54,42 @@ export const organizations = pgTable('organizations', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * A person, identified by their sign-in provider.
+ *
+ * Not owned by an organisation: one person can belong to several workspaces, and
+ * which one they act in is a membership, never a column on the user.
+ */
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
-  organizationId: uuid('organization_id').notNull().references(() => organizations.id),
-  email: text('email').notNull(),
+  /** 'github' today. The provider and its subject identify the person. */
+  authProvider: text('auth_provider').notNull().default('github'),
+  /** The provider's stable user id (GitHub's numeric id), never the login, which can change. */
+  providerSubject: text('provider_subject'),
+  login: text('login'),
+  /** Absent when the provider does not share one. */
+  email: text('email'),
   name: text('name').notNull(),
+  avatarUrl: text('avatar_url'),
+  lastSignInAt: timestamp('last_sign_in_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [uniqueIndex('users_org_email_idx').on(t.organizationId, t.email)]);
+}, (t) => [uniqueIndex('users_provider_subject_idx').on(t.authProvider, t.providerSubject)]);
+
+export const memberships = pgTable('memberships', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  role: membershipRoleEnum('role').notNull().default('member'),
+  /**
+   * This member's Slack user id in the workspace's Slack, once linked. A merge click
+   * counts only from a linked owner or admin.
+   */
+  slackUserId: text('slack_user_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('memberships_user_org_idx').on(t.userId, t.organizationId),
+  index('memberships_org_idx').on(t.organizationId),
+]);
 
 export const integrations = pgTable('integrations', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -158,6 +189,7 @@ export const deploymentPullRequests = pgTable('deployment_pull_requests', {
 /** Raw telemetry, stored so a regression can always be re-derived rather than trusted. */
 export const telemetrySnapshots = pgTable('telemetry_snapshots', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id),
   serviceId: uuid('service_id').notNull().references(() => services.id),
   deploymentId: uuid('deployment_id').references(() => deployments.id),
   metric: text('metric').notNull(),
@@ -178,6 +210,7 @@ export const telemetrySnapshots = pgTable('telemetry_snapshots', {
 
 export const regressions = pgTable('regressions', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id),
   deploymentId: uuid('deployment_id').references(() => deployments.id),
   serviceId: uuid('service_id').notNull().references(() => services.id),
   metric: text('metric').notNull(),
@@ -225,6 +258,7 @@ export const incidentEvents = pgTable('incident_events', {
 
 export const agentRuns = pgTable('agent_runs', {
   id: uuid('id').primaryKey(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id),
   incidentId: uuid('incident_id').references(() => incidents.id, { onDelete: 'cascade' }),
   agentName: text('agent_name').notNull(),
   status: runStatusEnum('status').notNull(),
@@ -235,10 +269,14 @@ export const agentRuns = pgTable('agent_runs', {
   endedAt: timestamp('ended_at', { withTimezone: true }),
   /** Lemma trace id, so a local run row opens in Lemma. */
   traceId: text('trace_id'),
-}, (t) => [index('agent_runs_incident_idx').on(t.incidentId, t.startedAt)]);
+}, (t) => [
+  index('agent_runs_incident_idx').on(t.incidentId, t.startedAt),
+  index('agent_runs_org_idx').on(t.organizationId, t.startedAt),
+]);
 
 export const toolCalls = pgTable('tool_calls', {
   id: uuid('id').primaryKey(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id),
   agentRunId: uuid('agent_run_id').notNull().references(() => agentRuns.id, { onDelete: 'cascade' }),
   incidentId: uuid('incident_id').references(() => incidents.id, { onDelete: 'cascade' }),
   toolName: text('tool_name').notNull(),
@@ -261,6 +299,7 @@ export const toolCalls = pgTable('tool_calls', {
  */
 export const evidence = pgTable('evidence', {
   id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id),
   incidentId: uuid('incident_id').notNull().references(() => incidents.id, { onDelete: 'cascade' }),
   kind: text('kind').notNull(),
   provenance: provenanceEnum('provenance').notNull(),

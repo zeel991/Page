@@ -36,8 +36,10 @@ import {
   TelemetryRepository,
   TimelineRepository,
   incidentUnitOfWork,
+  memberships,
   organizations,
   repositories as reposTable,
+  users,
   services,
 } from '@pager/db';
 import type { DeploymentRecord } from '@pager/providers';
@@ -74,6 +76,20 @@ async function main(): Promise<void> {
 
   const handle = await openDatabase(url);
   const [org] = await handle.db.insert(organizations).values({ name: 'Acme', slug: 'acme' }).returning();
+  // Seeded data belongs to a workspace, and a workspace is visible only to its
+  // members. Name the GitHub account (its numeric id) that should own it to see it.
+  const ownerGithubId = process.env.PAGER_SEED_OWNER_GITHUB_ID;
+  if (ownerGithubId) {
+    const [owner] = await handle.db
+      .insert(users)
+      .values({ authProvider: 'github', providerSubject: ownerGithubId, name: 'Seed owner' })
+      .onConflictDoNothing()
+      .returning();
+    if (owner) await handle.db.insert(memberships).values({ userId: owner.id, organizationId: org!.id, role: 'owner' });
+    console.log(`Workspace "Acme" is owned by GitHub user id ${ownerGithubId}.`);
+  } else {
+    console.log('PAGER_SEED_OWNER_GITHUB_ID is not set: the seeded workspace has no members, so nobody can see it.');
+  }
 
   const incidents = new IncidentRepository(handle.db);
   const timeline = new TimelineRepository(handle.db);
@@ -88,7 +104,7 @@ async function main(): Promise<void> {
   console.log(
     `Model: ${availability.available ? `${availability.model} (LIVE — the dashboard will show model-authored work)` : `none. ${availability.reason} Patches will be SCRIPTED fixtures.`}`,
   );
-  const tracer = new AgentTracer({ sink: new DrizzleTelemetrySink(handle.db), lemma: lemmaFromEnv() });
+  const tracer = new AgentTracer({ sink: new DrizzleTelemetrySink(handle.db, { organizationId: org!.id }), lemma: lemmaFromEnv() });
 
   console.log(`Seeding ${ids.length} scenario(s) into ${url}\n`);
 

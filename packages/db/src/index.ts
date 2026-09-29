@@ -6,3 +6,5 @@ export * from './client.js';
 export * from './repositories.js';
 export * from './telemetry-sink.js';
 export * from './migrate.js';
+export * from './identity.js';
+export * from './console-reads.js';

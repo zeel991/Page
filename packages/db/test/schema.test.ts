@@ -93,6 +93,7 @@ describe('database schema', () => {
 
     await expect(
       db.insert(evidence).values({
+        organizationId: org!.id,
         incidentId: inc!.id,
         kind: 'DATADOG_LOG',
         provenance: 'OBSERVED',
@@ -148,6 +149,40 @@ describe('migrations', () => {
     const h = await createDatabase('pglite://memory');
     await migrate(h, dir);
     expect(await tableExists(h, 'migration_probe')).toBe(true);
+    await h.close();
+  });
+
+  // Tenancy added an organisation column to five tables and moved users into
+  // memberships. A database with data in it must come through with every row
+  // attributed, not fail on NOT NULL and not lose its users' workspace.
+  it('carries existing rows into the tenant model', async () => {
+    const early = mkdtempSync(join(tmpdir(), 'pager-migrations-early-'));
+    cpSync(MIGRATIONS_DIR, early, { recursive: true });
+    const journalPath = join(early, 'meta', '_journal.json');
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+    journal.entries = journal.entries.slice(0, 1);
+    writeFileSync(journalPath, JSON.stringify(journal));
+
+    const h = await createDatabase('pglite://memory');
+    await migrate(h, early);
+    const q = (s: string) => h.pglite!.exec(s);
+    await q(`insert into organizations (id, name, slug) values ('00000000-0000-0000-0000-00000000000a', 'Acme', 'acme')`);
+    await q(`insert into users (id, organization_id, email, name) values ('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-00000000000a', 'a@acme.dev', 'Ada')`);
+    await q(`insert into services (id, organization_id, name) values ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-00000000000a', 'checkout')`);
+    await q(`insert into incidents (id, organization_id, service_id, key, state, severity, title) values ('00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-00000000000a', '00000000-0000-0000-0000-0000000000c1', 'INC-1', 'INCIDENT_OPEN', 'SEV2', 't')`);
+    await q(`insert into agent_runs (id, incident_id, agent_name, status, started_at) values ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000d1', 'A', 'OK', now()), ('00000000-0000-0000-0000-0000000000e2', null, 'Watcher', 'OK', now())`);
+    await q(`insert into tool_calls (id, agent_run_id, tool_name, status, duration_ms, started_at) values ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000e2', 't', 'OK', 1, now())`);
+    await q(`insert into evidence (incident_id, kind, provenance, summary, source_tool_call_id) values ('00000000-0000-0000-0000-0000000000d1', 'K', 'OBSERVED', 's', '00000000-0000-0000-0000-0000000000f1')`);
+
+    await migrate(h);
+    const one = async (s: string) => (await h.pglite!.query<Record<string, unknown>>(s)).rows;
+    expect(await one(`select role, organization_id from memberships`)).toEqual([
+      { role: 'owner', organization_id: '00000000-0000-0000-0000-00000000000a' },
+    ]);
+    for (const table of ['agent_runs', 'tool_calls', 'evidence']) {
+      const rows = await one(`select distinct organization_id from ${table}`);
+      expect(rows).toEqual([{ organization_id: '00000000-0000-0000-0000-00000000000a' }]);
+    }
     await h.close();
   });
 
