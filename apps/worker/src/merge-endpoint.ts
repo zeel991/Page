@@ -6,6 +6,8 @@ import {
   SlackSignatureError,
   assertMergeAllowed,
   decodeMergeAction,
+  slackLink,
+  toSlackMrkdwn,
   verifySlackSignature,
 } from '@pager/agents';
 import { PermissionDeniedError, type AutonomyLevel } from '@pager/core';
@@ -224,9 +226,11 @@ export async function handleSlackInteraction(
     send(responseUrl, body).catch((err: unknown) => {
       deps.log(`could not report the merge outcome to Slack: ${err instanceof Error ? err.message : String(err)}`);
     });
-  const say = (text: string) => report({ response_type: 'in_channel', replace_original: false, text });
+  // Usernames and GitHub's error text are not ours; only our own links survive.
+  const say = (text: string) =>
+    report({ response_type: 'in_channel', replace_original: false, text: toSlackMrkdwn(text) });
   const replaceWith = (lines: string[], fallback: string) =>
-    report({ replace_original: true, text: fallback, blocks: outcomeBlocks(lines) });
+    report({ replace_original: true, text: toSlackMrkdwn(fallback), blocks: outcomeBlocks(lines.map(toSlackMrkdwn)) });
 
   const work = (async () => {
     // 6. Is the pull request still open, and still what was reviewed? A message stays
@@ -280,7 +284,7 @@ export async function handleSlackInteraction(
         [
           `:white_check_mark: *#${target.pullRequest} merged by ${approvedBy}.*`,
           `Approval \`${approval.id}\` recorded against them. Pager Developer did not decide this.`,
-          `<${merged.url}|View the pull request>`,
+          slackLink(merged.url, 'View the pull request'),
         ],
         `#${target.pullRequest} merged by ${approvedBy}.`,
       );

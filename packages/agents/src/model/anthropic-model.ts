@@ -53,6 +53,8 @@ export interface ModelRequest {
   messages: ModelMessage[];
   tools: ModelToolSpec[];
   maxTokens?: number;
+  /** Cancels the request. The investigator's deadline is enforced through this. */
+  signal?: AbortSignal;
 }
 
 export type ModelMessage =
@@ -121,7 +123,7 @@ export class AnthropicModel implements ModelClient {
         input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
       })),
       messages: request.messages.map(toApiMessage),
-    });
+    }, request.signal ? { signal: request.signal } : undefined);
 
     const toolUses: ModelToolUse[] = [];
     let text = '';

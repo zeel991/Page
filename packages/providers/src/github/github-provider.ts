@@ -1,5 +1,8 @@
 import { registerSecret, type ChangedFile, type Commit } from '@pager/core';
 import { Http, ProviderHttpError } from '../http.js';
+import { UnsafeRepositoryPathError, segment } from '../path-guard.js';
+
+export { UnsafeRepositoryPathError, segment };
 import type {
   Branch,
   CommitComparison,
@@ -87,14 +90,6 @@ const FILE_STATUS: Record<string, ChangedFile['status']> = {
 };
 
 
-/**
- * URL-building for repository paths.
- *
- * Several of these values are chosen by a model — a file path to read, a ref to
- * inspect — and interpolating them raw lets `../` walk out of the repository into
- * any other `/repos/...` the token can see. Each value is validated and encoded,
- * so a path can only ever name something inside the repository it was asked about.
- */
 /** The pull request's head moved after it was reviewed; GitHub refused the merge (409). */
 export class PullRequestChangedError extends Error {
   constructor(
@@ -110,13 +105,8 @@ export class PullRequestChangedError extends Error {
   }
 }
 
-export class UnsafeRepositoryPathError extends Error {
-  constructor(what: string, value: string) {
-    super(`Refusing unsafe ${what}: ${JSON.stringify(value)}`);
-    this.name = 'UnsafeRepositoryPathError';
-  }
-}
-
+// Path components chosen by a model are validated and encoded, so `../` cannot walk
+// out of the repository into any other the token can see; see path-guard.ts.
 const REPO_PART = /^[A-Za-z0-9_.-]+$/;
 
 export function repoPath(repo: string): string {
@@ -127,10 +117,6 @@ export function repoPath(repo: string): string {
   return parts.map(encodeURIComponent).join('/');
 }
 
-export function segment(value: string): string {
-  if (value === '' || value === '.' || value === '..') throw new UnsafeRepositoryPathError('path segment', value);
-  return encodeURIComponent(value);
-}
 
 export function refPath(path: string): string {
   const parts = path.replace(/^\/+/, '').split('/');

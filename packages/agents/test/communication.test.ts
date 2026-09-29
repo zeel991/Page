@@ -168,3 +168,45 @@ describe('CommunicationAgent evidence gate', () => {
     expect(sink.failedToolCalls().map((c) => c.toolName)).toContain('slack.openThread');
   });
 });
+
+// Log lines, commit authors and model prose reached Slack raw, so an exception
+// message containing <!channel> pinged the whole channel.
+describe('Slack mrkdwn escaping', () => {
+  it('neutralises mentions and disguised links from untrusted text', async () => {
+    const { toSlackMrkdwn } = await import('../src/communication.js');
+    const out = toSlackMrkdwn('TypeError <!channel> see <https://evil.example|approve here> & <@U123>');
+    expect(out).toBe('TypeError &lt;!channel&gt; see &lt;https://evil.example|approve here&gt; &amp; &lt;@U123&gt;');
+  });
+
+  it('keeps the links this system built', async () => {
+    const { slackLink, toSlackMrkdwn } = await import('../src/communication.js');
+    const out = toSlackMrkdwn(`*Pull request*  ${slackLink('https://github.com/a/b/pull/12?x=1&y=2', '#12')} <!here>`);
+    expect(out).toBe('*Pull request*  <https://github.com/a/b/pull/12?x=1&y=2|#12> &lt;!here&gt;');
+  });
+
+  it('cannot be tricked into forging a link', async () => {
+    const { toSlackMrkdwn } = await import('../src/communication.js');
+    const forged = 'https://evilApprove';
+    expect(toSlackMrkdwn(forged)).not.toContain('<https://evil');
+  });
+
+  it('escapes what the agent posts, at the boundary', async () => {
+    const { CommunicationAgent } = await import('../src/communication.js');
+    const { AgentTracer, InMemorySink } = await import('@pager/observability');
+    const posted: string[] = [];
+    const agent = new CommunicationAgent({
+      kind: 'messaging',
+      openThread: async (_c: string, text: string) => {
+        posted.push(text);
+        return { id: '1', channel: '#c' };
+      },
+      replyInThread: async (_t: unknown, text: string) => {
+        posted.push(text);
+      },
+      readThread: async () => [],
+    });
+    const tracer = new AgentTracer({ sink: new InMemorySink(), lemma: null });
+    await tracer.run('c', {}, (ctx) => agent.openThread(ctx, '#c', 'root cause: <!channel> deploy'));
+    expect(posted[0]).toBe('root cause: &lt;!channel&gt; deploy');
+  });
+});

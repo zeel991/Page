@@ -82,4 +82,53 @@ describe('AgentTracer', () => {
       return null;
     });
   });
+
+  // ToolDefinition.timeoutMs and maxRetries were declared and never enforced.
+  it('fails a tool call that outlives its timeout, and records it', async () => {
+    const sink = new InMemorySink();
+    const started = Date.now();
+    await expect(
+      tracer(sink).run('X', {}, (ctx) => ctx.tool('slow', {}, () => new Promise(() => {}), { timeoutMs: 50 })),
+    ).rejects.toThrow(/did not answer within 50ms/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(sink.toolCalls[0]).toMatchObject({ toolName: 'slow', status: 'ERROR' });
+  });
+
+  it('retries a failed call within its budget, recording every attempt', async () => {
+    const sink = new InMemorySink();
+    let calls = 0;
+    const out = await tracer(sink).run('X', {}, (ctx) =>
+      ctx.tool('flaky', {}, async () => {
+        if (++calls === 1) throw new Error('503');
+        return 'ok';
+      }, { maxRetries: 1 }),
+    );
+    expect(out.value).toBe('ok');
+    expect(sink.toolCalls.map((c) => [c.attempt, c.status])).toEqual([[1, 'ERROR'], [2, 'OK']]);
+  });
+
+  it('does not retry past the budget, or retry a 4xx answer at all', async () => {
+    const sink = new InMemorySink();
+    let calls = 0;
+    await expect(
+      tracer(sink).run('X', {}, (ctx) =>
+        ctx.tool('down', {}, async () => {
+          calls++;
+          throw new Error('503');
+        }, { maxRetries: 2 }),
+      ),
+    ).rejects.toThrow('503');
+    expect(calls).toBe(3);
+
+    let notFound = 0;
+    await expect(
+      tracer(new InMemorySink()).run('X', {}, (ctx) =>
+        ctx.tool('missing', {}, async () => {
+          notFound++;
+          throw Object.assign(new Error('404'), { status: 404 });
+        }, { maxRetries: 2 }),
+      ),
+    ).rejects.toThrow('404');
+    expect(notFound).toBe(1);
+  });
 });

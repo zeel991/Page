@@ -43,12 +43,15 @@ export interface InvestigationProviders {
   knowledge: KnowledgeProvider | null;
 }
 
+/** Each read may take this long before it counts as failed. Enforced by the tracer. */
+export const READ_ONLY_TOOL_TIMEOUT_MS = 30_000;
+
 const READ_ONLY = {
   risk: 'READ_ONLY',
   minAutonomy: 'L1',
   requiresApproval: false,
   audit: false,
-  timeoutMs: 30_000,
+  timeoutMs: READ_ONLY_TOOL_TIMEOUT_MS,
   maxRetries: 1,
 } as const;
 

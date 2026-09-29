@@ -191,9 +191,11 @@ describe('local Datadog twin', () => {
   it('answers a malformed query with an error rather than an empty series', async () => {
     const dd = datadog();
     // No service tag: the adapter must not read this as "no data, all healthy".
+    // It now refuses before sending; the twin's 200-with-error answer to a query
+    // it cannot parse is covered in the adapter tests.
     await expect(
       dd.queryMetric('', 'error_rate', range),
-    ).rejects.toThrow(/Invalid query/);
+    ).rejects.toThrow(/unsafe service/);
   });
 });
 

@@ -58,6 +58,27 @@ describe('DatadogProvider', () => {
     expect(query).toMatch(/status_class:5xx\}\.as_count\(\) \/ sum:http\.server\.responses\{service:s\}\.as_count\(\)$/);
   });
 
+  // A model-chosen level went into the query raw, so "error OR service:other"
+  // widened a log read to another service.
+  it('builds log queries only from the configured service and allow-listed filters', async () => {
+    let query = '';
+    const dd = new DatadogProvider({
+      baseUrl: 'https://dd.test',
+      fetchImpl: jsonFetch((_url, init) => {
+        query = (JSON.parse(String(init.body)) as { filter: { query: string } }).filter.query;
+        return { data: [] };
+      }),
+    });
+    await dd.queryLogs('checkout-api', range, { level: 'error', filters: { 'http.status_code': '500' } });
+    expect(query).toBe('service:checkout-api status:error @http.status_code:500');
+
+    await expect(dd.queryLogs('checkout-api', range, { level: 'error OR service:other' as 'error' })).rejects.toThrow(/unsafe log level/);
+    await expect(dd.queryLogs('checkout-api', range, { filters: { env: 'prod OR service:x' } })).rejects.toThrow(/unsafe env/);
+    await expect(dd.queryLogs('checkout-api', range, { filters: { 'service': 'x' } as never })).rejects.toThrow(/unsafe log facet/);
+    await expect(dd.queryLogs('a} OR service:{b', range)).rejects.toThrow(/unsafe service/);
+    await expect(dd.queryMetric('a},service:{b', 'error_rate', range)).rejects.toThrow(/unsafe service/);
+  });
+
   it('drops null gaps rather than reading them as zero', async () => {
     const dd = new DatadogProvider({
       baseUrl: 'https://dd.test',
@@ -157,5 +178,33 @@ describe('SlackProvider', () => {
     });
     const msgs = await slack.readThread({ id: '1757772000.000100', channel: 'C1' });
     expect(msgs[0]!.text).toBe('first');
+  });
+});
+
+// Issue keys and page ids went into URL paths raw, so "../../myself" named a
+// different resource than the one asked about.
+describe('tracker and knowledge path safety', () => {
+  const seen: string[] = [];
+  const capture = jsonFetch((url) => {
+    seen.push(new URL(url).pathname);
+    return {};
+  });
+
+  it('encodes a Jira issue key as one path segment', async () => {
+    const { JiraProvider } = await import('../src/jira/jira-provider.js');
+    const jira = new JiraProvider({ baseUrl: 'https://acme.atlassian.test', projectKey: 'INC', fetchImpl: capture });
+    seen.length = 0;
+    await jira.getIssue('../../myself').catch(() => undefined);
+    expect(seen[0]).toBe('/rest/api/3/issue/..%2F..%2Fmyself');
+    await expect(jira.addComment('..', 'x')).rejects.toThrow(/unsafe issue key/);
+  });
+
+  it('encodes a Notion page id as one path segment', async () => {
+    const { NotionProvider } = await import('../src/notion/notion-provider.js');
+    const notion = new NotionProvider({ baseUrl: 'https://api.notion.test', token: 'secret_x', fetchImpl: capture });
+    seen.length = 0;
+    await notion.getDocument('../users').catch(() => undefined);
+    expect(seen[0]).toBe('/v1/pages/..%2Fusers');
+    await expect(notion.getDocument('.')).rejects.toThrow(/unsafe page id/);
   });
 });

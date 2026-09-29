@@ -1,5 +1,6 @@
 import type { Environment } from '@pager/core';
 import { Http } from '../http.js';
+import { LOG_FACETS, type LogFacet } from '../types.js';
 import type {
   LogEntry,
   MetricName,
@@ -99,6 +100,23 @@ const MONITOR_STATES: Record<string, MonitorState['status']> = {
   'No Data': 'NO_DATA',
 };
 
+/** A query the adapter will not build, because part of it is not a plain tag value. */
+export class UnsafeQueryError extends Error {
+  constructor(what: string, value: string) {
+    super(`Refusing to build a Datadog query from an unsafe ${what}: ${JSON.stringify(value)}`);
+    this.name = 'UnsafeQueryError';
+  }
+}
+
+/** Datadog tag and facet values: no spaces, braces, commas, quotes, colons-as-operators or wildcards. */
+const TAG_VALUE = /^[A-Za-z0-9_.\-/]+$/;
+const LEVELS = new Set<LogEntry['level']>(['debug', 'info', 'warn', 'error', 'fatal']);
+
+function tagValue(what: string, value: string): string {
+  if (!TAG_VALUE.test(value)) throw new UnsafeQueryError(what, value);
+  return value;
+}
+
 export interface DatadogProviderOptions {
   baseUrl: string;
   apiKey?: string;
@@ -128,7 +146,7 @@ export class DatadogProvider implements ObservabilityProvider {
     const res = await this.http.get<DdQueryResponse>('/api/v1/query', {
       from: Math.floor(range.from.getTime() / 1000),
       to: Math.floor(range.to.getTime() / 1000),
-      query: METRIC_QUERIES[metric](service),
+      query: METRIC_QUERIES[metric](tagValue('service', service)),
     });
 
     // A Datadog query can return 200 with an error payload. Treating that as an
@@ -157,11 +175,19 @@ export class DatadogProvider implements ObservabilityProvider {
   async queryLogs(
     service: string,
     range: TimeRange,
-    opts: { level?: LogEntry['level']; query?: string; limit?: number } = {},
+    opts: { level?: LogEntry['level']; filters?: Partial<Record<LogFacet, string>>; limit?: number } = {},
   ): Promise<LogEntry[]> {
-    const filters = [`service:${service}`];
-    if (opts.level) filters.push(`status:${opts.level}`);
-    if (opts.query) filters.push(opts.query);
+    // The service is the configured one and the rest is structured: nothing a caller
+    // passes is interpolated into the query as syntax.
+    const filters = [`service:${tagValue('service', service)}`];
+    if (opts.level !== undefined) {
+      if (!LEVELS.has(opts.level)) throw new UnsafeQueryError('log level', String(opts.level));
+      filters.push(`status:${opts.level}`);
+    }
+    for (const [facet, value] of Object.entries(opts.filters ?? {})) {
+      if (!(LOG_FACETS as readonly string[]).includes(facet)) throw new UnsafeQueryError('log facet', facet);
+      if (value !== undefined) filters.push(`@${facet}:${tagValue(facet, value)}`);
+    }
 
     const res = await this.http.post<DdLogsResponse>('/api/v2/logs/events/search', {
       filter: {
@@ -209,7 +235,7 @@ export class DatadogProvider implements ObservabilityProvider {
    */
   async listMonitors(service: string): Promise<MonitorState[]> {
     const [tagged, scoped] = await Promise.all([
-      this.http.get<DdMonitor[]>('/api/v1/monitor', { monitor_tags: `service:${service}` }),
+      this.http.get<DdMonitor[]>('/api/v1/monitor', { monitor_tags: `service:${tagValue('service', service)}` }),
       this.http
         .get<DdMonitor[]>('/api/v1/monitor', { tags: `service:${service}` })
         // A failure of the secondary filter must not lose the primary result.

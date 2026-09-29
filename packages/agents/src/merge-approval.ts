@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { assertToolAllowed, type AutonomyLevel, type ToolDefinition } from '@pager/core';
+import { toSlackMrkdwn } from './communication.js';
 
 /**
  * Merging, as an approved human action.
@@ -138,9 +139,10 @@ export function mergeButtonBlocks(input: {
   pullRequestUrl: string;
   action: MergeAction;
 }): unknown[] {
+  // Headline and summary carry a model's root cause and repository text.
   return [
-    { type: 'section', text: { type: 'mrkdwn', text: `*${input.headline}*` } },
-    { type: 'section', text: { type: 'mrkdwn', text: input.summary } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*${toSlackMrkdwn(input.headline)}*` } },
+    { type: 'section', text: { type: 'mrkdwn', text: toSlackMrkdwn(input.summary) } },
     {
       type: 'actions',
       elements: [

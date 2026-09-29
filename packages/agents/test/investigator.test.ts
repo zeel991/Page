@@ -118,6 +118,60 @@ afterEach(async () => {
 });
 
 describe('IncidentInvestigator', () => {
+  // The deadline was checked only between turns, so one model call that never
+  // returned held the investigation open indefinitely.
+  it('cancels a model call still running at the deadline', async () => {
+    const env = await environment();
+    let aborted = false;
+    const hanging: ModelClient = {
+      model: 'hanging-model',
+      complete: (request) =>
+        new Promise((_, reject) => {
+          request.signal?.addEventListener('abort', () => {
+            aborted = true;
+            reject(new Error('aborted'));
+          });
+        }),
+    };
+    const started = Date.now();
+    const result = await investigatorFor(hanging, env.providers, { maxSeconds: 0.3 }).investigate({
+      target: env.target,
+      cluster: env.cluster,
+      monitorName: 'checkout-api error rate',
+      firedAt: new Date('2026-09-13T14:34:00Z'),
+    });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(aborted).toBe(true);
+    expect(result.limitHit).toBe('time');
+    expect(result.abandonedReason).toMatch(/model call in flight was cancelled/);
+  });
+
+  it('bounds each tool call by its declared timeout', async () => {
+    const env = await environment();
+    const stalled = { ...env.providers.observability, queryLogs: () => new Promise<never>(() => {}) } as never;
+    const model = new ScriptedModel([
+      { toolUses: [{ id: 'u1', name: 'read_logs', input: { window: 'observation' } }], stopReason: 'tool_use' },
+      { toolUses: [], stopReason: 'end_turn' },
+    ]);
+    const { READ_ONLY_TOOL_TIMEOUT_MS } = await import('../src/investigator/tools.js');
+    expect(READ_ONLY_TOOL_TIMEOUT_MS).toBe(30_000);
+    const investigator = new IncidentInvestigator({
+      model,
+      tracer: new AgentTracer({ sink: new InMemorySink(), lemma: null }),
+      providers: { ...env.providers, observability: stalled },
+      toolTimeoutMs: 50,
+    });
+    const result = await investigator.investigate({
+      target: env.target,
+      cluster: env.cluster,
+      monitorName: 'checkout-api error rate',
+      firedAt: new Date('2026-09-13T14:34:00Z'),
+    });
+    expect(result.failedToolCalls).toBe(1);
+    const told = model.requests[1]!.messages.filter((m) => m.role === 'user').at(-1) as { content: { content: string }[] };
+    expect(told.content[0]!.content).toMatch(/did not answer within 50ms/);
+  });
+
   it('rejects findings that cite a tool call the tracer never issued', async () => {
     const env = await environment();
     // Two turns: the first fabricates an id, the second repeats the fabrication.

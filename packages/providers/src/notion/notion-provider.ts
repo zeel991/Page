@@ -1,3 +1,4 @@
+import { segment } from '../path-guard.js';
 import { Http } from '../http.js';
 import type {
   KnowledgeDocument,
@@ -231,7 +232,7 @@ export class NotionProvider implements KnowledgeProvider {
   }
 
   async getDocument(id: string): Promise<KnowledgeDocument | null> {
-    const page = await this.http.getOptional<NotionPage>(`/v1/pages/${id}`);
+    const page = await this.http.getOptional<NotionPage>(`/v1/pages/${segment(id, 'page id')}`);
     if (!page) return null;
 
     const lines: string[] = [];
@@ -240,7 +241,7 @@ export class NotionProvider implements KnowledgeProvider {
     // would be worse than useless during an incident.
     do {
       const res = await this.http.get<{ results?: NotionBlock[]; next_cursor?: string | null; has_more?: boolean }>(
-        `/v1/blocks/${id}/children`,
+        `/v1/blocks/${segment(id, 'block id')}/children`,
         { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) },
       );
       for (const block of res.results ?? []) lines.push(renderBlock(block));

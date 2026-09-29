@@ -1,3 +1,4 @@
+import { segment } from '../path-guard.js';
 import { Http } from '../http.js';
 import type {
   CreateIssueInput,
@@ -172,7 +173,7 @@ export class JiraProvider implements IssueTrackerProvider {
   }
 
   async getIssue(idOrKey: string): Promise<Issue | null> {
-    const res = await this.http.getOptional<JiraIssueResponse>(`/rest/api/3/issue/${idOrKey}`);
+    const res = await this.http.getOptional<JiraIssueResponse>(`/rest/api/3/issue/${segment(idOrKey, 'issue key')}`);
     if (!res) return null;
     const f = res.fields ?? {};
     return {
@@ -196,7 +197,7 @@ export class JiraProvider implements IssueTrackerProvider {
     if (input.title !== undefined) fields.summary = input.title;
     if (input.description !== undefined) fields.description = toAdf(input.description);
     if (Object.keys(fields).length > 0) {
-      await this.http.put(`/rest/api/3/issue/${idOrKey}`, { fields });
+      await this.http.put(`/rest/api/3/issue/${segment(idOrKey, 'issue key')}`, { fields });
     }
     if (input.state) await this.transitionTo(idOrKey, input.state);
   }
@@ -209,7 +210,7 @@ export class JiraProvider implements IssueTrackerProvider {
    */
   private async transitionTo(idOrKey: string, target: IssueState): Promise<void> {
     const res = await this.http.get<{ transitions?: JiraTransition[] }>(
-      `/rest/api/3/issue/${idOrKey}/transitions`,
+      `/rest/api/3/issue/${segment(idOrKey, 'issue key')}/transitions`,
     );
     const transitions = res.transitions ?? [];
     const wanted = TRANSITION_NAMES[target].map((n) => n.toLowerCase());
@@ -222,12 +223,12 @@ export class JiraProvider implements IssueTrackerProvider {
     if (!match) {
       throw new JiraStateError(idOrKey, target, transitions.map((t) => t.name));
     }
-    await this.http.post(`/rest/api/3/issue/${idOrKey}/transitions`, { transition: { id: match.id } });
+    await this.http.post(`/rest/api/3/issue/${segment(idOrKey, 'issue key')}/transitions`, { transition: { id: match.id } });
   }
 
   async addComment(idOrKey: string, body: string): Promise<IssueComment> {
     const res = await this.http.post<{ id: string; created?: string }>(
-      `/rest/api/3/issue/${idOrKey}/comment`,
+      `/rest/api/3/issue/${segment(idOrKey, 'issue key')}/comment`,
       { body: toAdf(body) },
     );
     return { id: res.id, body, createdAt: res.created ? new Date(res.created) : new Date() };
@@ -235,7 +236,7 @@ export class JiraProvider implements IssueTrackerProvider {
 
   async listComments(idOrKey: string): Promise<IssueComment[]> {
     const res = await this.http.get<{ comments?: { id: string; body?: unknown; created?: string }[] }>(
-      `/rest/api/3/issue/${idOrKey}/comment`,
+      `/rest/api/3/issue/${segment(idOrKey, 'issue key')}/comment`,
     );
     return (res.comments ?? []).map((c) => ({
       id: c.id,

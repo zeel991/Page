@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { assertClaimSupported, type Claim, type Evidence } from '@pager/core';
 import type { MessagingProvider, MessageThread } from '@pager/providers';
 import type { AgentRunContext } from '@pager/observability';
@@ -16,6 +17,40 @@ import type { AgentRunContext } from '@pager/observability';
  *
  * Internal reasoning is not posted. Slack gets meaningful state changes.
  */
+
+/**
+ * Slack mrkdwn escaping.
+ *
+ * Much of what reaches Slack came from somewhere untrusted: an exception message in
+ * the logs, a commit author, a file in the repository, the model's own prose. In
+ * mrkdwn, `<!channel>` pings everyone and `<https://evil|click to approve>` is a
+ * disguised link, so any of those sources could post either. Slack's own rule is
+ * that `&`, `<` and `>` are escaped; after that, no control sequence survives.
+ *
+ * Links this system builds itself are marked with `slackLink` and restored after
+ * escaping, so they are the only `<…>` constructs a message can contain.
+ */
+// Markers carry a per-process nonce, so text from a log or a model cannot forge one.
+const NONCE = randomBytes(8).toString('hex');
+const LINK_OPEN = `\uE000${NONCE}`;
+const LINK_SEP = `\uE001${NONCE}`;
+const LINK_CLOSE = `\uE002${NONCE}`;
+const LINK = new RegExp(`${LINK_OPEN}(.*?)${LINK_SEP}(.*?)${LINK_CLOSE}`, 'gs');
+
+export function escapeMrkdwn(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** A link we built, preserved by `toSlackMrkdwn`. The label is escaped; the URL must be http(s). */
+export function slackLink(url: string, label: string): string {
+  if (!/^https?:\/\/[^\s<>|]+$/.test(url)) return `${label} (${url})`;
+  return `${LINK_OPEN}${url}${LINK_SEP}${label.replace(/[|]/g, '/')}${LINK_CLOSE}`;
+}
+
+/** Escape a whole message, keeping only the links marked with `slackLink`. */
+export function toSlackMrkdwn(text: string): string {
+  return escapeMrkdwn(text).replace(LINK, (_m, url: string, label: string) => `<${url.replace(/&amp;/g, '&')}|${label}>`);
+}
 
 export interface IncidentSummary {
   key: string;
@@ -157,7 +192,7 @@ export function formatFixReady(
 
   lines.push('');
   if (verification.pullRequestUrl) {
-    lines.push(`*Pull request*  <${verification.pullRequestUrl}|#${verification.pullRequestNumber}>`);
+    lines.push(`*Pull request*  ${slackLink(verification.pullRequestUrl, `#${verification.pullRequestNumber}`)}`);
   }
   lines.push('*Awaiting human approval.* No production change will be made without it.');
   return lines.join('\n');
@@ -222,7 +257,7 @@ export class CommunicationAgent {
   ): Promise<MessageThread> {
     this.gate(claims, evidence);
     const { value } = await ctx.tool('slack.openThread', { channel }, () =>
-      this.messaging.openThread(channel, text),
+      this.messaging.openThread(channel, toSlackMrkdwn(text)),
     );
     return value;
   }
@@ -236,7 +271,7 @@ export class CommunicationAgent {
   ): Promise<void> {
     this.gate(claims, evidence);
     await ctx.tool('slack.replyInThread', { channel: thread.channel, threadTs: thread.id }, () =>
-      this.messaging.replyInThread(thread, text),
+      this.messaging.replyInThread(thread, toSlackMrkdwn(text)),
     );
   }
 

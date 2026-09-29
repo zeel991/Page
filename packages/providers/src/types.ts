@@ -151,6 +151,15 @@ export interface LogEntry {
   attributes: Record<string, unknown>;
 }
 
+/**
+ * The log attributes a caller may filter on, beyond the service and level.
+ *
+ * An allow-list, because a filter is often chosen by a model: free text would let
+ * it widen a query to another service (`OR service:other`) or rewrite it entirely.
+ */
+export const LOG_FACETS = ['env', 'version', 'host', 'http.method', 'http.status_code', 'http.url_details.path', 'error.kind'] as const;
+export type LogFacet = (typeof LOG_FACETS)[number];
+
 export interface MonitorState {
   id: string;
   name: string;
@@ -175,7 +184,7 @@ export interface ObservabilityProvider {
   queryLogs(
     service: string,
     range: TimeRange,
-    opts?: { level?: LogEntry['level']; query?: string; limit?: number },
+    opts?: { level?: LogEntry['level']; filters?: Partial<Record<LogFacet, string>>; limit?: number },
   ): Promise<LogEntry[]>;
   listMonitors(service: string): Promise<MonitorState[]>;
 }

@@ -1,5 +1,5 @@
-import type { AgentRunContext, AgentTracer } from '@pager/observability';
-import type { AutonomyLevel } from '@pager/core';
+import { withPolicy, type AgentRunContext, type AgentTracer } from '@pager/observability';
+import type { AutonomyLevel, ToolDefinition } from '@pager/core';
 import { DEFAULT_AUTONOMY_LEVEL } from '@pager/core';
 import type { ModelClient, ModelMessage, ModelToolSpec, ModelUserBlock } from '../model/anthropic-model.js';
 import type { ErrorCluster } from '../log-analysis.js';
@@ -184,6 +184,8 @@ export interface InvestigatorDeps {
   providers: InvestigationProviders;
   autonomy?: AutonomyLevel;
   limits?: Partial<InvestigatorLimits>;
+  /** Overrides every tool's declared timeout. For tests. */
+  toolTimeoutMs?: number;
 }
 
 export interface InvestigationInput {
@@ -218,7 +220,7 @@ export class IncidentInvestigator {
     ctx: AgentRunContext,
     input: InvestigationInput,
     specs: ModelToolSpec[],
-    byModelName: Map<string, { run: (c: AgentRunContext, a: Record<string, unknown>, t: InvestigationTarget, p: InvestigationProviders) => Promise<unknown> }>,
+    byModelName: Map<string, { definition: ToolDefinition; run: (c: AgentRunContext, a: Record<string, unknown>, t: InvestigationTarget, p: InvestigationProviders) => Promise<unknown> }>,
     started: number,
   ): Promise<InvestigationResult> {
     const modelCalls: ModelCallRecord[] = [];
@@ -243,11 +245,23 @@ export class IncidentInvestigator {
         break;
       }
 
-      const response = await this.deps.model.complete({
-        system: SYSTEM_PROMPT,
-        messages,
-        tools: specs,
-      });
+      // The deadline bounds the model call itself, not just the gaps between turns:
+      // one slow call used to be able to run the investigation far past its budget.
+      let response: Awaited<ReturnType<ModelClient['complete']>>;
+      try {
+        response = await this.deps.model.complete({
+          system: SYSTEM_PROMPT,
+          messages,
+          tools: specs,
+          signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        });
+      } catch (err) {
+        if (Date.now() < deadline) throw err;
+        limitHit = 'time';
+        abandonedReason =
+          `Investigation exceeded its ${this.limits.maxSeconds}s budget; the model call in flight was cancelled.`;
+        break;
+      }
 
       modelCalls.push({
         model: response.model,
@@ -340,7 +354,12 @@ export class IncidentInvestigator {
         toolCallCount++;
         const before = ctx.toolCallIds().length;
         try {
-          const value = await tool.run(ctx, use.input, input.target, this.deps.providers);
+          // Each tool's declared timeout and retry budget is enforced by the tracer.
+          const policy = {
+            timeoutMs: this.deps.toolTimeoutMs ?? tool.definition.timeoutMs,
+            maxRetries: tool.definition.maxRetries,
+          };
+          const value = await tool.run(withPolicy(ctx, policy), use.input, input.target, this.deps.providers);
           const issued = ctx.toolCallIds();
           const toolCallId = issued.length > before ? issued[issued.length - 1]! : null;
           results.push({
