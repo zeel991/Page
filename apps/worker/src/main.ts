@@ -40,6 +40,7 @@ import { loadConfig, describeConfig, type WorkerConfig } from './config.ts';
 import { renderDashboard } from './dashboard.ts';
 import { handleSlackInteraction, type MergeApproval } from './merge-endpoint.ts';
 import { deploymentFromRevision, probeDeployedRevision } from './deployed-revision.ts';
+import { decideRecoveryWindow } from './recovery-window.ts';
 
 const log = (message: string): void => {
   console.log(`${new Date().toISOString()}  ${message}`);
@@ -242,7 +243,8 @@ interface PendingMerge {
   rootCause: string;
   baselineWindow: TimeRange;
   incidentWindow: TimeRange;
-  postRemediationWindow: TimeRange;
+  /** When a deployed revision containing the merge was first observed. */
+  deployedAt: Date | null;
   url: string;
   since: Date;
 }
@@ -262,13 +264,14 @@ async function settleMerged(
   sourceControl: SourceControlProvider,
 ): Promise<void> {
   for (const [number, ctxItem] of [...pending]) {
-    let state: string;
+    let pr: Awaited<ReturnType<SourceControlProvider['getPullRequest']>>;
     try {
-      state = (await sourceControl.getPullRequest(config.repository, number)).state;
+      pr = await sourceControl.getPullRequest(config.repository, number);
     } catch (err) {
       log(`could not read #${number}: ${err instanceof Error ? err.message : String(err)}`);
       continue;
     }
+    const state = pr.state;
 
     if (state === 'open') continue;
     if (state !== 'merged') {
@@ -276,6 +279,22 @@ async function settleMerged(
       log(`#${number} was closed without merging; dropping it`);
       pending.delete(number);
       status.awaitingMerge = [...pending.values()].map(toAwaiting);
+      continue;
+    }
+
+    // Post-fix traffic starts when production runs the merge, not when the pull
+    // request was opened. Until then, and for the window after, keep waiting.
+    const decision = await decideRecoveryWindow({
+      repository: config.repository,
+      pullRequest: pr,
+      deployedAt: ctxItem.deployedAt,
+      now: new Date(),
+      probe: () => probeDeployedRevision(config.healthUrl, { allowPrivate: config.allowPrivateHealthUrl }),
+      sourceControl,
+    });
+    if (decision.kind === 'wait') {
+      ctxItem.deployedAt = decision.deployedAt;
+      log(`  ${decision.reason}`);
       continue;
     }
 
@@ -293,7 +312,7 @@ async function settleMerged(
       rootCause: ctxItem.rootCause,
       baselineWindow: ctxItem.baselineWindow,
       incidentWindow: ctxItem.incidentWindow,
-      postRemediationWindow: ctxItem.postRemediationWindow,
+      postRemediationWindow: decision.kind === 'ready' ? decision.window : { unavailable: decision.reason },
       ...(config.email ? { teamEmails: config.email.to } : {}),
     });
 
@@ -552,7 +571,7 @@ async function tick(config: WorkerConfig, handled: Set<string>): Promise<void> {
       rootCause: result.patch?.rootCause ?? 'see the pull request',
       baselineWindow: windows[0],
       incidentWindow: { from: windows[1].from, to: new Date() },
-      postRemediationWindow: { from: new Date(), to: new Date(Date.now() + 15 * 60_000) },
+      deployedAt: null,
       url: result.pullRequest.url,
       since: new Date(),
     });

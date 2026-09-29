@@ -272,6 +272,7 @@ async function main(): Promise<void> {
   stored.state = 'closed';
   stored.merged = true;
   stored.mergeCommitSha = stored.headSha;
+  stored.mergedAt = '2026-09-13T14:50:00Z';
   console.log(`  #${pr.number} merged by a human. Pager did not merge it.`);
 
   // ── Resume ───────────────────────────────────────────────────────────────

@@ -20,9 +20,17 @@ import type {
  * telemetry is prevented by construction, not by instruction.
  */
 
-const METRIC_QUERIES: Record<MetricName, (service: string) => string> = {
-  error_rate: (s) => `sum:trace.http.request.errors{service:${s}}.as_rate()`,
-  http_5xx_rate: (s) => `sum:http.server.responses{service:${s},status_class:5xx}.as_rate()`,
+/**
+ * `error_rate` and `http_5xx_rate` are ratios: failed requests over all requests in
+ * the same interval. They used to be `errors.as_rate()` — errors per second — while
+ * labelled `ratio`, so a tolerance meant as "half a percentage point" was applied to
+ * a per-second count, and a quiet service read as healthy whatever its error ratio.
+ */
+export const METRIC_QUERIES: Record<MetricName, (service: string) => string> = {
+  error_rate: (s) =>
+    `sum:trace.http.request.errors{service:${s}}.as_count() / sum:trace.http.request.hits{service:${s}}.as_count()`,
+  http_5xx_rate: (s) =>
+    `sum:http.server.responses{service:${s},status_class:5xx}.as_count() / sum:http.server.responses{service:${s}}.as_count()`,
   request_throughput: (s) => `sum:trace.http.request.hits{service:${s}}.as_rate()`,
   latency_p50: (s) => `p50:trace.http.request.duration{service:${s}}`,
   latency_p95: (s) => `p95:trace.http.request.duration{service:${s}}`,
@@ -31,6 +39,8 @@ const METRIC_QUERIES: Record<MetricName, (service: string) => string> = {
   cpu_utilization: (s) => `avg:system.cpu.user{service:${s}}`,
   memory_utilization: (s) => `avg:system.mem.pct_usable{service:${s}}`,
 };
+
+const RATIO_METRICS = new Set<MetricName>(['error_rate', 'http_5xx_rate']);
 
 const METRIC_UNITS: Record<MetricName, string> = {
   error_rate: 'ratio',
@@ -138,7 +148,9 @@ export class DatadogProvider implements ObservabilityProvider {
       service,
       environment: this.environment,
       points,
-      unit: res.series?.[0]?.unit?.[0]?.name ?? METRIC_UNITS[metric],
+      // A computed ratio's series carries the numerator's unit ("error"), which is
+      // not what the value is; ours is authoritative for those.
+      unit: RATIO_METRICS.has(metric) ? 'ratio' : (res.series?.[0]?.unit?.[0]?.name ?? METRIC_UNITS[metric]),
     };
   }
 

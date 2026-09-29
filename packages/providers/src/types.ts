@@ -26,6 +26,22 @@ export interface PullRequest {
   url: string;
   state: 'open' | 'closed' | 'merged';
   mergeCommitSha: string | null;
+  /** The commit the pull request's branch points at now. What a reviewer reviewed, if unchanged. */
+  headSha: string;
+  /** When GitHub recorded the merge. Null when unmerged, or when the provider did not say. */
+  mergedAt: Date | null;
+}
+
+/**
+ * How two commits relate, as GitHub's compare API reports it.
+ *
+ * `ahead` means `head` descends from `base`; `identical` means they are the same
+ * commit. Either way, `head` contains everything in `base`.
+ */
+export interface CommitComparison {
+  status: 'identical' | 'ahead' | 'behind' | 'diverged';
+  aheadBy: number;
+  behindBy: number;
 }
 
 export interface Branch {
@@ -53,6 +69,8 @@ export interface SourceControlProvider {
   getCommit(repo: string, sha: string): Promise<Commit>;
   getDiff(repo: string, baseSha: string, headSha: string): Promise<Diff>;
   listCommitsBetween(repo: string, baseSha: string, headSha: string): Promise<Commit[]>;
+  /** Whether `headSha` contains `baseSha`, and by how much they differ. */
+  compareCommits(repo: string, baseSha: string, headSha: string): Promise<CommitComparison>;
   /** Most recent commits on a ref, newest first. Used to resolve what is deployed. */
   listCommits(repo: string, opts?: { ref?: string; limit?: number }): Promise<Commit[]>;
   getPullRequest(repo: string, number: number): Promise<PullRequest>;

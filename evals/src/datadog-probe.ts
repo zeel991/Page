@@ -195,8 +195,8 @@ async function main(): Promise<void> {
 
 function describeQuery(metric: MetricName, service: string): string {
   const shapes: Record<string, string> = {
-    error_rate: `sum:trace.http.request.errors{service:${service}}.as_rate()`,
-    http_5xx_rate: `sum:http.server.responses{service:${service},status_class:5xx}.as_rate()`,
+    error_rate: `sum:trace.http.request.errors{service:${service}}.as_count() / sum:trace.http.request.hits{service:${service}}.as_count()`,
+    http_5xx_rate: `sum:http.server.responses{service:${service},status_class:5xx}.as_count() / sum:http.server.responses{service:${service}}.as_count()`,
     latency_p95: `p95:trace.http.request.duration{service:${service}}`,
     request_throughput: `sum:trace.http.request.hits{service:${service}}.as_rate()`,
   };

@@ -26,6 +26,38 @@ describe('DatadogProvider', () => {
     expect(series.unit).toBe('ratio');
   });
 
+  // error_rate was errors.as_rate() — errors per second — labelled "ratio".
+  it('queries error_rate as failed requests over all requests', async () => {
+    let query = '';
+    const dd = new DatadogProvider({
+      baseUrl: 'https://dd.test',
+      fetchImpl: jsonFetch((url) => {
+        query = new URL(url).searchParams.get('query') ?? '';
+        return { series: [{ metric: 'x', pointlist: [[1, 0.02]], unit: [{ name: 'error' }] }] };
+      }),
+    });
+    const series = await dd.queryMetric('checkout-api', 'error_rate', range);
+    expect(query).toBe(
+      'sum:trace.http.request.errors{service:checkout-api}.as_count() / sum:trace.http.request.hits{service:checkout-api}.as_count()',
+    );
+    expect(query).not.toMatch(/as_rate/);
+    // The numerator's unit is not the ratio's.
+    expect(series.unit).toBe('ratio');
+  });
+
+  it('queries http_5xx_rate as 5xx responses over all responses', async () => {
+    let query = '';
+    const dd = new DatadogProvider({
+      baseUrl: 'https://dd.test',
+      fetchImpl: jsonFetch((url) => {
+        query = new URL(url).searchParams.get('query') ?? '';
+        return { series: [] };
+      }),
+    });
+    await dd.queryMetric('s', 'http_5xx_rate', range);
+    expect(query).toMatch(/status_class:5xx\}\.as_count\(\) \/ sum:http\.server\.responses\{service:s\}\.as_count\(\)$/);
+  });
+
   it('drops null gaps rather than reading them as zero', async () => {
     const dd = new DatadogProvider({
       baseUrl: 'https://dd.test',

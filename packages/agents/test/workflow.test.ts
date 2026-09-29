@@ -222,6 +222,7 @@ describe('IncidentWorkflow', () => {
     const pr = repo.pullRequests.find((p) => p.number === first.pullRequest!.number)!;
     pr.merged = true;
     pr.state = 'closed';
+    pr.mergedAt = '2026-09-13T14:50:00Z';
 
     // Telemetry is left as-is: still broken.
     const after = await workflow.completeAfterMerge({
@@ -242,6 +243,96 @@ describe('IncidentWorkflow', () => {
     // No write-up and no email: there is nothing settled to report.
     expect(after.writeUpUrl).toBeNull();
     expect(server.current.emails).toHaveLength(0);
+  });
+
+  it('leaves the ticket open, and says why, when recovery could not be measured', async () => {
+    // The README promises the incident stays open on UNVERIFIABLE. The ticket used
+    // to be commented "recovery verified" and resolved regardless of the verdict.
+    const { workflow, deployment } = await build(INC_001, 'scripted');
+    const first = await workflow.run({ ...input, deployment });
+
+    const repo = server.current.repositories.get('acme/checkout-api')!;
+    const pr = repo.pullRequests.find((p) => p.number === first.pullRequest!.number)!;
+    pr.merged = true;
+    pr.state = 'closed';
+    pr.mergedAt = '2026-09-13T14:50:00Z';
+
+    const after = await workflow.completeAfterMerge({
+      ...input,
+      pullRequestNumber: pr.number,
+      slackThread: { id: server.current.messages[0]!.ts, channel: '#incidents' },
+      issueKey: first.issue!.key,
+      alert: first.alert!,
+      rootCause: first.patch!.rootCause,
+      baselineWindow: { from: new Date('2026-09-13T14:00:00Z'), to: new Date('2026-09-13T14:30:59Z') },
+      incidentWindow: { from: new Date('2026-09-13T14:31:00Z'), to: new Date('2026-09-13T14:50:00Z') },
+      // A window with no telemetry at all: nothing can be compared.
+      postRemediationWindow: { from: new Date('2026-09-20T00:00:00Z'), to: new Date('2026-09-20T00:15:00Z') },
+    });
+
+    expect(after.recoveryVerdict).toBe('UNVERIFIABLE');
+    const issue = server.current.issues.find((i) => i.key === first.issue!.key)!;
+    expect(issue.status).not.toBe('Resolved');
+    const last = issue.comments.at(-1)!.body;
+    expect(last).not.toMatch(/recovery verified/i);
+    expect(last).toMatch(/could not be (measured|verified)/i);
+    expect(last).toMatch(/open/i);
+  });
+});
+
+describe('post-fix window', () => {
+  it('refuses to measure recovery over traffic from before the merge', async () => {
+    // The window used to be fixed at PR-open time, so a merge noticed later was
+    // "verified" over the incident's own traffic.
+    const { workflow, deployment } = await build(INC_001, 'scripted');
+    const first = await workflow.run({ ...input, deployment });
+    const repo = server.current.repositories.get('acme/checkout-api')!;
+    const pr = repo.pullRequests.find((p) => p.number === first.pullRequest!.number)!;
+    pr.merged = true;
+    pr.state = 'closed';
+    pr.mergedAt = '2026-09-13T15:30:00Z';
+
+    const after = await workflow.completeAfterMerge({
+      ...input,
+      pullRequestNumber: pr.number,
+      slackThread: { id: server.current.messages[0]!.ts, channel: '#incidents' },
+      issueKey: first.issue!.key,
+      alert: first.alert!,
+      rootCause: first.patch!.rootCause,
+      baselineWindow: { from: new Date('2026-09-13T14:00:00Z'), to: new Date('2026-09-13T14:30:59Z') },
+      incidentWindow: { from: new Date('2026-09-13T14:31:00Z'), to: new Date('2026-09-13T14:50:00Z') },
+      postRemediationWindow: { from: new Date('2026-09-13T14:50:00Z'), to: new Date('2026-09-13T15:05:00Z') },
+    });
+
+    expect(after.recoveryVerdict).toBe('UNVERIFIABLE');
+    expect(after.recovery!.summary).toMatch(/before #\d+ merged at 2026-09-13T15:30:00.000Z/);
+    // Nothing was queried for a window that cannot evidence anything.
+    expect(after.recovery!.comparisons).toHaveLength(0);
+  });
+
+  it('reports why when the fix was never observed deployed', async () => {
+    const { workflow, deployment } = await build(INC_001, 'scripted');
+    const first = await workflow.run({ ...input, deployment });
+    const repo = server.current.repositories.get('acme/checkout-api')!;
+    const pr = repo.pullRequests.find((p) => p.number === first.pullRequest!.number)!;
+    pr.merged = true;
+    pr.state = 'closed';
+    pr.mergedAt = '2026-09-13T14:50:00Z';
+
+    const after = await workflow.completeAfterMerge({
+      ...input,
+      pullRequestNumber: pr.number,
+      slackThread: { id: server.current.messages[0]!.ts, channel: '#incidents' },
+      issueKey: first.issue!.key,
+      alert: first.alert!,
+      rootCause: first.patch!.rootCause,
+      baselineWindow: { from: new Date('2026-09-13T14:00:00Z'), to: new Date('2026-09-13T14:30:59Z') },
+      incidentWindow: { from: new Date('2026-09-13T14:31:00Z'), to: new Date('2026-09-13T14:50:00Z') },
+      postRemediationWindow: { unavailable: 'the merge commit was never observed in the deployed revision' },
+    });
+
+    expect(after.recoveryVerdict).toBe('UNVERIFIABLE');
+    expect(after.recovery!.summary).toMatch(/never observed in the deployed revision/);
   });
 });
 

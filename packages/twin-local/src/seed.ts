@@ -192,6 +192,7 @@ export function seedFromFixture(fixture: ScenarioFixture): TwinState {
       state: mergeCommit ? 'closed' : 'open',
       merged: Boolean(mergeCommit),
       mergeCommitSha: mergeCommit?.sha ?? null,
+      mergedAt: mergeCommit?.committedAt ?? null,
       headSha: head?.sha ?? '',
     });
   }

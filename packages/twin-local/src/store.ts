@@ -40,6 +40,8 @@ export interface StoredPullRequest {
   merged: boolean;
   mergeCommitSha: string | null;
   headSha: string;
+  /** ISO time of the merge, as GitHub's `merged_at`. */
+  mergedAt?: string | null;
 }
 
 export interface StoredRepository {

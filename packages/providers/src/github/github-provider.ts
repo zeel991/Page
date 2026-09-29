@@ -2,6 +2,7 @@ import type { ChangedFile, Commit } from '@pager/core';
 import { Http, ProviderHttpError } from '../http.js';
 import type {
   Branch,
+  CommitComparison,
   CommitFilesInput,
   CreatePullRequestInput,
   Diff,
@@ -46,6 +47,9 @@ interface GhFile {
 }
 
 interface GhCompareResponse {
+  status?: string;
+  ahead_by?: number;
+  behind_by?: number;
   files?: GhFile[];
   commits?: GhCommitResponse[];
 }
@@ -70,6 +74,7 @@ interface GhPullRequest {
   html_url: string;
   state: string;
   merged?: boolean;
+  merged_at?: string | null;
   merge_commit_sha?: string | null;
 }
 
@@ -221,6 +226,20 @@ export class GitHubProvider implements SourceControlProvider {
       `/repos/${repoPath(repo)}/compare/${segment(baseSha)}...${segment(headSha)}`,
     );
     return (res.commits ?? []).map(toCommit);
+  }
+
+  async compareCommits(repo: string, baseSha: string, headSha: string): Promise<CommitComparison> {
+    const res = await this.http.get<GhCompareResponse>(
+      `/repos/${repoPath(repo)}/compare/${segment(baseSha)}...${segment(headSha)}`,
+      { per_page: 1 },
+    );
+    const status = res.status;
+    if (status !== 'identical' && status !== 'ahead' && status !== 'behind' && status !== 'diverged') {
+      // An unrecognised or missing status is not "ahead": ancestry decides whether a
+      // fix is deployed, so it is never assumed.
+      throw new Error(`GitHub compare returned no usable status (${JSON.stringify(status ?? null)}).`);
+    }
+    return { status, aheadBy: res.ahead_by ?? 0, behindBy: res.behind_by ?? 0 };
   }
 
   /** Recursive tree for a revision, as a path -> blob sha map. */
@@ -479,6 +498,8 @@ function toPullRequest(pr: GhPullRequest): PullRequest {
     url: pr.html_url,
     state: pr.merged ? 'merged' : pr.state === 'closed' ? 'closed' : 'open',
     mergeCommitSha: pr.merge_commit_sha ?? null,
+    headSha: pr.head.sha,
+    mergedAt: pr.merged_at ? new Date(pr.merged_at) : null,
   };
 }
 

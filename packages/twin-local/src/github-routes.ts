@@ -86,6 +86,7 @@ function prJson(repo: StoredRepository, pr: StoredRepository['pullRequests'][num
     html_url: `https://github.local/${repo.fullName}/pull/${pr.number}`,
     state: pr.state,
     merged: pr.merged,
+    merged_at: pr.merged ? (pr.mergedAt ?? null) : null,
     merge_commit_sha: pr.mergeCommitSha,
   };
 }
@@ -282,12 +283,22 @@ export function githubRoutes(): Route[] {
 
         const files = diffCommits(base, head);
         const between = commitsBetween(repo, base, head);
+        const behind = commitsBetween(repo, head, base);
+        // The relation GitHub reports, derived from the graph rather than asserted.
+        const relation =
+          base.sha === head.sha
+            ? 'identical'
+            : behind.length === 0
+              ? 'ahead'
+              : between.length === 0
+                ? 'behind'
+                : 'diverged';
         return {
           status: 200,
           body: {
-            status: 'ahead',
+            status: relation,
             ahead_by: between.length,
-            behind_by: 0,
+            behind_by: behind.length,
             total_commits: between.length,
             commits: between.map((c) => commitJson(repo, c)),
             files: files.map(fileJson),
@@ -396,6 +407,7 @@ export function githubRoutes(): Route[] {
         }
         pr.merged = true;
         pr.state = 'closed';
+        pr.mergedAt = new Date(ctx.now()).toISOString();
         pr.mergeCommitSha = pr.headSha;
         repo.branches.set(pr.baseRef, pr.headSha);
         return { status: 200, body: { merged: true, sha: pr.headSha, message: 'Pull Request successfully merged' } };

@@ -50,6 +50,12 @@ export interface RecoveryVerification {
   summary: string;
   /** Metrics that could not be compared. Their absence blocks a recovery claim. */
   unverified: { metric: MetricName; reason: string }[];
+  /**
+   * Requests served in the post-fix window, estimated from the request rate. Null
+   * when it could not be measured — which blocks a recovery claim, because a
+   * service nobody called has no errors and has proved nothing.
+   */
+  postFixRequests: number | null;
 }
 
 /**
@@ -61,13 +67,23 @@ export interface RecoveryVerification {
  */
 export const RECOVERY_THRESHOLD = 0.85;
 
+/**
+ * The fewest requests after the fix that can evidence a recovery.
+ *
+ * Below this, an error ratio is noise: 0 errors in 3 requests is not a recovery.
+ */
+export const MIN_POST_FIX_REQUESTS = 100;
+
 export interface RecoveryOptions {
   threshold?: number;
+  /** Minimum post-fix traffic. Fewer requests than this is UNVERIFIABLE. */
+  minRequests?: number;
   /** Absolute difference from baseline that always counts as recovered. */
   absoluteTolerance?: Partial<Record<MetricName, number>>;
 }
 
 const DEFAULT_TOLERANCE: Partial<Record<MetricName, number>> = {
+  // Ratios (failed ÷ all requests): half a percentage point.
   error_rate: 0.005,
   http_5xx_rate: 0.005,
   availability: 0.002,
@@ -132,6 +148,24 @@ export interface RecoveryInput {
   postRemediationWindow: TimeRange;
 }
 
+/**
+ * The verdict when no window of post-fix traffic exists to measure.
+ *
+ * Nothing was queried, so nothing is compared and no monitor is consulted: the
+ * reason is the whole of what is known.
+ */
+export function unmeasuredRecovery(summary: string): RecoveryVerification {
+  return {
+    comparisons: [],
+    monitorsRecovered: null,
+    recovered: false,
+    verdict: 'UNVERIFIABLE',
+    summary,
+    unverified: [],
+    postFixRequests: null,
+  };
+}
+
 export class RecoveryVerifier {
   constructor(private readonly observability: ObservabilityProvider) {}
 
@@ -191,6 +225,8 @@ export class RecoveryVerifier {
       }
     }
 
+    const postFixRequests = await this.countRequests(ctx, input);
+
     // Monitors are a second, independent signal. A metric that looks recovered while
     // a monitor still alerts is not a recovery. Null means we could not tell, which
     // is treated as neither confirmation nor contradiction below.
@@ -202,7 +238,7 @@ export class RecoveryVerifier {
     const recovered =
       everyMetricRecovered && unverified.length === 0 && monitorsRecovered !== false;
 
-    const { verdict, summary } = decide({
+    const decided = decide({
       comparisons,
       unverified,
       monitorsRecovered,
@@ -210,7 +246,58 @@ export class RecoveryVerifier {
       recovered,
     });
 
-    return { comparisons, monitorsRecovered, recovered, verdict, summary, unverified };
+    // Too little traffic evidences nothing, so it vetoes a recovery claim: no
+    // errors from no requests must never read as recovered. (A ratio still
+    // elevated is left as it is — it came from requests that really failed, and
+    // both outcomes keep the incident open.)
+    const minRequests = opts.minRequests ?? MIN_POST_FIX_REQUESTS;
+    if (decided.verdict === 'RECOVERED' && (postFixRequests === null || postFixRequests < minRequests)) {
+      return {
+        comparisons,
+        monitorsRecovered,
+        recovered: false,
+        verdict: 'UNVERIFIABLE',
+        summary:
+          postFixRequests === null
+            ? 'Recovery could not be verified: the error signals settled, but traffic after the fix could not ' +
+              'be measured, so an absence of errors cannot be told apart from an absence of requests.'
+            : `Recovery could not be verified: only about ${postFixRequests} request(s) were served after the ` +
+              `fix, and at least ${minRequests} are needed before an error ratio means anything.`,
+        unverified,
+        postFixRequests,
+      };
+    }
+    const { verdict, summary } = decided;
+
+    return { comparisons, monitorsRecovered, recovered, verdict, summary, unverified, postFixRequests };
+  }
+
+  /**
+   * Requests served in the post-fix window.
+   *
+   * Estimated from the request rate: each point's rate times the sampling step.
+   * Null when there is no rate data, which is unknown, not zero.
+   */
+  private async countRequests(ctx: AgentRunContext, input: RecoveryInput): Promise<number | null> {
+    try {
+      const res = await ctx.tool(
+        'datadog.queryMetric',
+        { service: input.service, metric: 'request_throughput', window: 'post' },
+        () => this.observability.queryMetric(input.service, 'request_throughput', input.postRemediationWindow),
+      );
+      const points = res.value.points;
+      if (points.length === 0) return null;
+      const windowMs = input.postRemediationWindow.to.getTime() - input.postRemediationWindow.from.getTime();
+      const stepMs =
+        points.length > 1
+          ? (points.at(-1)!.at.getTime() - points[0]!.at.getTime()) / (points.length - 1)
+          : windowMs;
+      // Never credit more time than the window holds.
+      const coveredSeconds = Math.min(windowMs, stepMs * points.length) / 1000;
+      return Math.round(mean(points.map((p) => p.value)) * coveredSeconds);
+    } catch {
+      return null;
+    }
   }
 }
 

@@ -36,7 +36,7 @@ import {
 import type { IncidentInvestigator, InvestigationResult } from './investigator/investigator.js';
 import { DEFAULT_AUTONOMY_LEVEL, assertToolAllowed, type AutonomyLevel, type ToolDefinition } from '@pager/core';
 import { CommunicationAgent, formatFixReady } from './communication.js';
-import { RecoveryVerifier, type RecoveryVerification } from './recovery.js';
+import { RecoveryVerifier, unmeasuredRecovery, type RecoveryVerification } from './recovery.js';
 import type { IncidentEngine } from './incident-engine.js';
 import type { IncidentState } from '@pager/core';
 import type {
@@ -930,7 +930,12 @@ export class IncidentWorkflow {
       issueKey?: string | null;
       baselineWindow: TimeRange;
       incidentWindow: TimeRange;
-      postRemediationWindow: TimeRange;
+      /**
+       * Post-fix traffic to measure. It must begin at or after the merge — ideally
+       * once the deployed revision contains the merge commit. When no such window
+       * exists (the fix was never observed deployed), say why instead.
+       */
+      postRemediationWindow: TimeRange | { unavailable: string };
       rootCause: string;
       alert: ProductionAlert;
     },
@@ -1005,16 +1010,32 @@ export class IncidentWorkflow {
     await advance('VERIFYING_RECOVERY', 'Watching telemetry for a return to baseline.');
 
     // ── 7. Watch Datadog again ───────────────────────────────────────────────
+    // A window that starts before the merge measures the incident, not the fix.
+    // That used to happen whenever a merge landed later than the window fixed at
+    // PR-open time, so the window is checked against GitHub's own merge time.
+    const window = input.postRemediationWindow;
+    const unmeasurable =
+      'unavailable' in window
+        ? window.unavailable
+        : !pr.mergedAt
+          ? `GitHub did not report when #${pr.number} was merged, so no window can be placed after it.`
+          : window.from.getTime() < pr.mergedAt.getTime()
+            ? `The post-fix window starts at ${window.from.toISOString()}, before #${pr.number} merged at ` +
+              `${pr.mergedAt.toISOString()}; it would measure traffic from before the fix.`
+            : null;
     const verifier = new RecoveryVerifier(this.deps.observability);
-    const recovery = await this.deps.tracer.run('RecoveryVerifier', {}, (ctx) =>
-      verifier.verify(ctx, {
-        service: input.service,
-        metrics: ['error_rate', 'http_5xx_rate', 'latency_p95'],
-        baselineWindow: input.baselineWindow,
-        incidentWindow: input.incidentWindow,
-        postRemediationWindow: input.postRemediationWindow,
-      }),
-    );
+    const recovery =
+      unmeasurable !== null || 'unavailable' in window
+        ? unmeasuredRecovery(`Recovery could not be measured: ${unmeasurable}`)
+        : await this.deps.tracer.run('RecoveryVerifier', {}, (ctx) =>
+            verifier.verify(ctx, {
+              service: input.service,
+              metrics: ['error_rate', 'http_5xx_rate', 'latency_p95'],
+              baselineWindow: input.baselineWindow,
+              incidentWindow: input.incidentWindow,
+              postRemediationWindow: window,
+            }),
+          );
     result.recovery = recovery;
     step('verifying_recovery', `Recovery ${recovery.recovered ? 'verified' : 'NOT verified'}.`);
 
@@ -1119,14 +1140,21 @@ export class IncidentWorkflow {
       .catch(() => undefined);
 
     if (this.deps.issueTracker && input.issueKey) {
+      // The ticket follows the incident: it closes only on a measured recovery.
+      // Anything else says what could not be established and leaves it open.
+      const recovered = recovery.verdict === 'RECOVERED';
       await this.deps.tracer
         .run('IssueTracker', {}, async (ctx) => {
           await ctx.tool('issues.addComment', { key: input.issueKey }, () =>
             this.deps.issueTracker!.addComment(
               input.issueKey!,
-              `Resolved. #${pr.number} merged and recovery verified.`,
+              recovered
+                ? `Resolved. #${pr.number} merged and recovery verified. ${recovery.summary}`
+                : `#${pr.number} merged, but recovery could not be measured. ${recovery.summary} ` +
+                  `Leaving this ticket open for a human to close.`,
             ),
           );
+          if (!recovered) return;
           await ctx.tool('issues.resolve', { key: input.issueKey }, () =>
             this.deps.issueTracker!.updateIssue(input.issueKey!, { state: 'resolved' }),
           );

@@ -241,9 +241,42 @@ describe('recovery verdict', () => {
   it('reports RECOVERED when the signal returned', async () => {
     const r = await run(verifierOver({
       'error_rate:baseline': [0.004], 'error_rate:incident': [0.18], 'error_rate:post': [0.005],
+      // 2 requests/s over the 30-minute post window.
+      'request_throughput:post': [2],
     }));
     expect(r.verdict).toBe('RECOVERED');
     expect(r.recovered).toBe(true);
+    expect(r.postFixRequests).toBe(3600);
+  });
+
+  // Zero errors from zero requests used to read as a clean recovery.
+  it('never reads zero traffic as recovered', async () => {
+    const r = await run(verifierOver({
+      'error_rate:baseline': [0.004], 'error_rate:incident': [0.18], 'error_rate:post': [0],
+      'request_throughput:post': [0],
+    }));
+    expect(r.verdict).toBe('UNVERIFIABLE');
+    expect(r.recovered).toBe(false);
+    expect(r.summary).toMatch(/only about 0 request\(s\)/);
+  });
+
+  it('refuses a recovery claim below the traffic floor', async () => {
+    const r = await run(verifierOver({
+      'error_rate:baseline': [0.004], 'error_rate:incident': [0.18], 'error_rate:post': [0.001],
+      // ~36 requests in 30 minutes.
+      'request_throughput:post': [0.02],
+    }));
+    expect(r.verdict).toBe('UNVERIFIABLE');
+    expect(r.summary).toMatch(/at least 100 are needed/);
+  });
+
+  it('refuses a recovery claim when traffic could not be measured', async () => {
+    const r = await run(verifierOver({
+      'error_rate:baseline': [0.004], 'error_rate:incident': [0.18], 'error_rate:post': [0.005],
+    }));
+    expect(r.verdict).toBe('UNVERIFIABLE');
+    expect(r.postFixRequests).toBeNull();
+    expect(r.summary).toMatch(/traffic after the fix could not be measured/);
   });
 
   it('never claims recovery from an unmeasured signal', async () => {
