@@ -1,4 +1,5 @@
 import {
+  bigint,
   boolean,
   doublePrecision,
   index,
@@ -11,6 +12,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { INCIDENT_STATES } from '@pager/core';
 
 /**
@@ -535,3 +537,81 @@ export const auditLogs = pgTable('audit_logs', {
   detail: jsonb('detail').$type<Record<string, unknown>>(),
   at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [index('audit_org_time_idx').on(t.organizationId, t.at)]);
+
+export const jobStatusEnum = pgEnum('job_status', ['queued', 'running', 'done', 'failed', 'cancelled', 'budget_blocked']);
+
+/**
+ * The worker's queue, in Postgres (FOR UPDATE SKIP LOCKED), so no second datastore.
+ *
+ * At most one job per service runs at once, enforced by a partial unique index
+ * rather than by the worker remembering: two workers, or one restarted mid-job,
+ * cannot both act on the same service. A running job holds a lease; a worker that
+ * dies stops renewing it, and the job becomes claimable again.
+ */
+export const jobs = pgTable('jobs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  serviceId: uuid('service_id').references(() => services.id, { onDelete: 'cascade' }),
+  incidentId: uuid('incident_id').references(() => incidents.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(),
+  status: jobStatusEnum('status').notNull().default('queued'),
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull().default({}),
+  /** At most one queued-or-running job per key: a service is not polled twice at once. */
+  dedupeKey: text('dedupe_key'),
+  runAt: timestamp('run_at', { withTimezone: true }).notNull().defaultNow(),
+  attempts: integer('attempts').notNull().default(0),
+  maxAttempts: integer('max_attempts').notNull().default(3),
+  lockedBy: text('locked_by'),
+  leaseUntil: timestamp('lease_until', { withTimezone: true }),
+  lastError: text('last_error'),
+  result: jsonb('result').$type<Record<string, unknown>>(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp('finished_at', { withTimezone: true }),
+}, (t) => [
+  index('jobs_claim_idx').on(t.status, t.runAt),
+  uniqueIndex('jobs_one_running_per_service_idx').on(t.serviceId).where(sql`status = 'running' and service_id is not null`),
+  uniqueIndex('jobs_dedupe_idx').on(t.dedupeKey).where(sql`status in ('queued', 'running') and dedupe_key is not null`),
+]);
+
+/**
+ * One row per (service, deployed revision) the worker acted on.
+ *
+ * This is what the single-tenant worker kept in memory — the revisions it had
+ * handled, the pull requests it was waiting on — and lost on every restart. Each
+ * checkpoint is written as the side effect happens (incident opened, ticket filed,
+ * thread posted, branch made, pull request opened), so a run resumed after a crash
+ * reuses what exists instead of doing it twice.
+ */
+export const revisionRuns = pgTable('revision_runs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  serviceId: uuid('service_id').notNull().references(() => services.id, { onDelete: 'cascade' }),
+  deployedRevision: text('deployed_revision').notNull(),
+  /** 'running' | 'not_escalated' | 'halted' | 'awaiting_merge' | 'verifying' | 'settled' | 'closed_unmerged' */
+  phase: text('phase').notNull().default('running'),
+  incidentId: uuid('incident_id').references(() => incidents.id, { onDelete: 'set null' }),
+  incidentKey: text('incident_key'),
+  issueKey: text('issue_key'),
+  issueUrl: text('issue_url'),
+  slackChannel: text('slack_channel'),
+  slackThreadTs: text('slack_thread_ts'),
+  branch: text('branch'),
+  pullRequestNumber: integer('pull_request_number'),
+  pullRequestUrl: text('pull_request_url'),
+  headSha: text('head_sha'),
+  /** What the aftermath needs that a pull request number cannot carry. */
+  alert: jsonb('alert'),
+  rootCause: text('root_cause'),
+  baselineWindow: jsonb('baseline_window').$type<{ from: string; to: string }>(),
+  incidentWindow: jsonb('incident_window').$type<{ from: string; to: string }>(),
+  deployedAt: timestamp('deployed_at', { withTimezone: true }),
+  mergedAt: timestamp('merged_at', { withTimezone: true }),
+  recoveryVerdict: text('recovery_verdict'),
+  outcome: text('outcome'),
+  /** Model usage for the run, when a model was used. */
+  inputTokens: bigint('input_tokens', { mode: 'number' }),
+  outputTokens: bigint('output_tokens', { mode: 'number' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex('revision_runs_service_revision_idx').on(t.serviceId, t.deployedRevision)]);

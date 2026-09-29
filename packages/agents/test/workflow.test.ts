@@ -387,3 +387,16 @@ describe('pull request title', () => {
     expect(pullRequestTitle('INC-2', 'Guard  the\n\n  code.')).toBe('INC-2: Guard the code');
   });
 });
+
+describe('forward-only advance', () => {
+  it('walks intermediate states, skips states already passed, and goes direct off the path', async () => {
+    const { forwardSteps } = await import('../src/workflow.js');
+    expect(forwardSteps('INCIDENT_OPEN', 'INVESTIGATING')).toEqual(['INVESTIGATING']);
+    // A resumed run that finds the incident at VALIDATING and is asked for AWAITING_APPROVAL.
+    expect(forwardSteps('VALIDATING', 'AWAITING_APPROVAL')).toEqual(['FIX_READY', 'AWAITING_APPROVAL']);
+    // A second repair pass asking for FIXING again is a no-op, not an illegal transition.
+    expect(forwardSteps('VALIDATING', 'FIXING')).toEqual([]);
+    expect(forwardSteps('FIXING', 'FIXING')).toEqual([]);
+    expect(forwardSteps('REPRODUCING', 'UNRESOLVED')).toEqual(['UNRESOLVED']);
+  });
+});

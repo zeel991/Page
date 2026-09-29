@@ -99,6 +99,11 @@ export class IncidentEngine {
     return incident;
   }
 
+  /** The incident as stored now. */
+  async get(incidentId: string): Promise<IncidentRow | null> {
+    return this.incidents.byId(incidentId);
+  }
+
   /** Apply a state transition, or throw and audit the refusal. */
   async transition(incidentId: string, input: TransitionInput): Promise<IncidentRow> {
     const outcome = this.unitOfWork

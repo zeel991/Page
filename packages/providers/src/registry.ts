@@ -14,7 +14,12 @@ import type {
 } from './types.js';
 
 /**
- * Provider wiring.
+ * Provider wiring for the evaluation harness, demos and local development.
+ *
+ * DEVELOPMENT ONLY where it takes a static credential (GITHUB_TOKEN and the other
+ * `real` backends): the product's worker does not use this registry. It builds each
+ * tenant's providers from that workspace's vault and reaches GitHub only through an
+ * installation token narrowed to the one repository (apps/worker/src/tenant.ts).
  *
  * Backend selection happens exactly once, here. Everything downstream receives an
  * interface and cannot tell — and must never ask — whether it is talking to an Arga

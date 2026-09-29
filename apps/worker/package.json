@@ -12,6 +12,7 @@
   "dependencies": {
     "@pager/agents": "workspace:*",
     "@pager/core": "workspace:*",
+    "@pager/db": "workspace:*",
     "@pager/observability": "workspace:*",
     "@pager/providers": "workspace:*",
     "@pager/sandbox": "workspace:*"

@@ -43,6 +43,13 @@
       "when": 1790707484516,
       "tag": "0005_service_config",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790707888173,
+      "tag": "0006_worker_queue",
+      "breakpoints": true
     }
   ]
 }

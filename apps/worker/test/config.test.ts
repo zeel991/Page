@@ -1,40 +1,30 @@
+import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { WorkerConfigError, loadConfig } from '../src/config.ts';
+import { WorkerConfigError, describeConfig, loadConfig } from '../src/config.ts';
 
-const BASE = {
-  PAGER_SERVICE: 'checkout-api',
-  PAGER_REPOSITORY: 'acme/checkout-api',
-  PAGER_HEALTH_URL: 'https://checkout.example.com/health',
-  PAGER_SLACK_CHANNEL: '#incidents',
-  DATADOG_API_KEY: 'k',
-  DATADOG_APP_KEY: 'a',
-  GITHUB_TOKEN: 'g',
-  SLACK_BOT_TOKEN: 's',
-  ANTHROPIC_API_KEY: 'x',
-};
-
+const BASE = { DATABASE_URL: 'postgres://pager@db/pager', PAGER_MASTER_KEY: randomBytes(32).toString('base64') };
 const load = (env: Record<string, string>) => () => loadConfig({ ...BASE, ...env });
 
 describe('worker configuration', () => {
-  it('accepts a complete configuration with defaults', () => {
+  it('needs only the operator’s settings; nothing about any tenant', () => {
     const config = loadConfig(BASE);
-    expect(config.intervalSeconds).toBe(60);
-    expect(config.autonomy).toBe('L3');
+    expect(config.concurrency).toBe(2);
+    expect(config.slackSigningSecret).toBeNull();
+    // The single-tenant variables are gone: a service is configured in the console.
+    expect(Object.keys(config)).not.toContain('service');
+    expect(Object.keys(config)).not.toContain('repository');
   });
 
-  // NaN once made setTimeout fire immediately, hammering every provider.
-  it.each(['abc', '0', '5', '1.5', '99999'])('refuses PAGER_INTERVAL_SECONDS=%s', (value) => {
-    expect(load({ PAGER_INTERVAL_SECONDS: value })).toThrow(/PAGER_INTERVAL_SECONDS/);
+  it('refuses to start without a database or a valid master key', () => {
+    expect(() => loadConfig({})).toThrow(WorkerConfigError);
+    expect(load({ PAGER_MASTER_KEY: 'short' })).toThrow(/PAGER_MASTER_KEY/);
   });
 
-  it('refuses to send Datadog keys to a host that is not Datadog', () => {
-    expect(load({ DATADOG_BASE_URL: 'https://evil.example.com' })).toThrow(/DATADOG_BASE_URL/);
-    expect(load({ DATADOG_BASE_URL: 'http://api.datadoghq.com' })).toThrow(/DATADOG_BASE_URL/);
-    expect(loadConfig({ ...BASE, DATADOG_BASE_URL: 'https://api.datadoghq.eu' }).datadog.baseUrl).toBe('https://api.datadoghq.eu');
+  it.each(['0', 'abc', '1.5'])('refuses PAGER_WORKER_CONCURRENCY=%s', (value) => {
+    expect(load({ PAGER_WORKER_CONCURRENCY: value })).toThrow(/PAGER_WORKER_CONCURRENCY/);
   });
 
-  it('runs repository code locally by default, and says it is development only', async () => {
-    const { describeConfig } = await import('../src/config.ts');
+  it('runs repository code locally by default, and says it is development only', () => {
     const config = loadConfig(BASE);
     expect(config.sandbox).toEqual({ runner: 'local' });
     expect(describeConfig(config)).toMatch(/LOCAL PROCESS — DEVELOPMENT ONLY/);
@@ -45,31 +35,11 @@ describe('worker configuration', () => {
     expect(load({ PAGER_SANDBOX_RUNNER: 'chroot' })).toThrow(/PAGER_SANDBOX_RUNNER/);
   });
 
-  it('refuses an autonomy level too low to report', () => {
-    expect(load({ PAGER_AUTONOMY_LEVEL: 'L1' })).toThrow(/at least L2/);
-  });
-
-  it('refuses a merge button with no named approvers', () => {
-    const err = (() => {
-      try {
-        loadConfig({ ...BASE, PAGER_ENABLE_MERGE_BUTTON: '1', SLACK_SIGNING_SECRET: 'sec' });
-      } catch (e) {
-        return e;
-      }
-    })();
-    expect(err).toBeInstanceOf(WorkerConfigError);
-    expect(String(err)).toMatch(/PAGER_SLACK_TEAM_ID/);
-    expect(String(err)).toMatch(/PAGER_MERGE_APPROVERS/);
-  });
-
-  it('reads merge approvers', () => {
-    const config = loadConfig({
-      ...BASE,
-      PAGER_ENABLE_MERGE_BUTTON: '1',
-      SLACK_SIGNING_SECRET: 'sec',
-      PAGER_SLACK_TEAM_ID: 'T1',
-      PAGER_MERGE_APPROVERS: 'U1, U2',
-    });
-    expect(config.mergeApprovers).toEqual({ teamId: 'T1', userIds: ['U1', 'U2'], channelId: null });
+  it('never logs a secret', () => {
+    const config = loadConfig({ ...BASE, SLACK_SIGNING_SECRET: 'sss-signing-secret', ANTHROPIC_API_KEY: 'sk-ant-xyz' });
+    const text = describeConfig(config);
+    expect(text).not.toContain('sss-signing-secret');
+    expect(text).not.toContain('sk-ant-xyz');
+    expect(text).not.toContain(BASE.PAGER_MASTER_KEY);
   });
 });

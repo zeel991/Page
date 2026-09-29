@@ -12,3 +12,4 @@ export * from './vault.js';
 export * from './installations.js';
 export * from './slack.js';
 export * from './services-config.js';
+export * from './jobs.js';

@@ -175,24 +175,28 @@ reproduces and hands off; it simply never claims to have diagnosed anything.
 
 ### Run it as a service
 
-`apps/worker` is Pager Developer with nobody typing anything.
+`apps/worker` is Pager Developer with nobody typing anything — for every workspace
+at once.
 
 ```bash
-pnpm --filter @pager/worker start        # watch continuously
-pnpm --filter @pager/worker once         # a single check, then exit
+pnpm db:migrate                          # the release step, against Postgres
+pnpm --filter @pager/worker start        # claim and run jobs continuously
+pnpm --filter @pager/worker once         # run everything due, then exit
 ```
 
-It requires `PAGER_SERVICE`, `PAGER_REPOSITORY`, `PAGER_HEALTH_URL`,
-`PAGER_SLACK_CHANNEL`, the Datadog key pair, `GITHUB_TOKEN`, `SLACK_BOT_TOKEN` and
-`ANTHROPIC_API_KEY` — and refuses to start without them. A gap discovered
-mid-incident is worse than one discovered at boot.
+Nothing about any service is configured in its environment. Each workspace sets up
+its services in the console — repository, health URL, Datadog, Slack channel,
+autonomy — and the worker reads them from the database. The environment holds only
+what the operator owns: `DATABASE_URL`, `PAGER_MASTER_KEY`, the GitHub App
+(`GITHUB_APP_*`), `SLACK_SIGNING_SECRET` for the merge button, and optionally an
+operator `ANTHROPIC_API_KEY` for workspaces that have not brought their own.
 
-Optional, and absent means absent rather than broken: `NOTION_TOKEN` +
-`NOTION_PARENT_PAGE_ID` for postmortems, and `RESEND_API_KEY` +
-`PAGER_EMAIL_FROM` + `PAGER_TEAM_EMAILS` for the team mail.
-
-`PAGER_READ_ONLY=1` drops it to L2 — it investigates, reproduces and validates, but
-may not open a pull request.
+The work is a Postgres queue (`FOR UPDATE SKIP LOCKED`): poll each enabled service on
+its interval, run an incident when one is new, wait on the human merge, verify
+recovery. At most one job per service runs at once, and a global cap bounds the
+rest. Everything is in the database, so a worker killed mid-incident loses nothing:
+its lease expires and another worker resumes the incident, reusing the ticket,
+thread, branch and pull request it had already made.
 
 **Where the repository's code runs.** Reproducing a failure means executing the
 watched repository's tests, and a patch, which is untrusted code.
@@ -205,18 +209,17 @@ the environment (an allow-list), working directory and process group contained. 
 Docker runner is unit-tested against the command it builds, but has not yet been
 run against a real Docker daemon.
 
-**The status page is unauthenticated.** `/` and `/status` show a remote reader the
-incidents and stages but not approver names or raw vendor errors; localhost, or
-`PAGER_PUBLIC_STATUS=1`, gets the full record. Credentials are redacted everywhere.
+The worker serves `/health` and `/status` (queue depth only, no tenant data). Incidents
+are read in the console, per workspace, behind sign-in.
 
-**It asks the service what revision it is running**, through `PAGER_HEALTH_URL`, and
+**It asks the service what revision it is running**, through its health URL, and
 skips the tick when the service cannot say. Every claim rests on having tested the
 tree that is actually failing, so this is never inferred.
 
 One incident per deployed revision. A monitor stays red for as long as the bug is
 live, and an agent that opened a pull request on every poll would be
-indistinguishable from a denial of service against its own reviewers — so the fix
-branch name is derived from the revision, and its existence is the durable record.
+indistinguishable from a denial of service against its own reviewers — so each
+(service, deployed revision) is recorded once, durably, before anything is done about it.
 
 ### Point it at real infrastructure
 

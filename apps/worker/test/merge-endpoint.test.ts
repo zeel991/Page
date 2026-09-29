@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { MERGE_ACTION_ID, encodeMergeAction } from '@pager/agents';
 import type { SourceControlProvider } from '@pager/providers';
-import { handleSlackInteraction, type MergeEndpointDeps } from '../src/merge-endpoint.ts';
+import { handleSlackInteraction, type MergeAuditEntry, type MergeEndpointDeps, type MergeRoute } from '../src/merge-endpoint.ts';
 
 /**
  * The one endpoint that can change production. A valid Slack signature proves the
@@ -53,13 +53,23 @@ function interaction(overrides: { team?: string; user?: string; channel?: string
 }
 
 /** Everything posted back to Slack after the acknowledgement, and the work that posted it. */
-type Deps = MergeEndpointDeps & { responses: { url: string; body: { text?: string } }[]; settled: () => Promise<void> };
+type Deps = MergeEndpointDeps & {
+  responses: { url: string; body: { text?: string } }[];
+  audits: MergeAuditEntry[];
+  settled: () => Promise<void>;
+};
 
-function deps(sourceControl: Partial<SourceControlProvider>): Deps {
+/**
+ * Endpoint tests use a routing that approves one fixed click; who may merge is the
+ * routing's job, tested against the database below and in merge-routing.test.ts.
+ */
+function deps(sourceControl: Partial<SourceControlProvider>, route?: Partial<MergeRoute>): Deps {
   const responses: Deps['responses'] = [];
+  const audits: MergeAuditEntry[] = [];
   const work: Promise<void>[] = [];
   return {
     responses,
+    audits,
     settled: async () => {
       await Promise.all(work);
     },
@@ -70,12 +80,20 @@ function deps(sourceControl: Partial<SourceControlProvider>): Deps {
       work.push(p);
     },
     signingSecret: SECRET,
-    enabled: true,
-    autonomy: 'L4',
-    repository: REPO,
-    approvers: { teamId: 'T1', userIds: ['U_APPROVER'], channelId: 'C_INCIDENTS' },
-    sourceControl: sourceControl as SourceControlProvider,
-    approvals: [],
+    routing: {
+      resolve: async () =>
+        ({
+          ok: true,
+          organizationId: 'org-1',
+          approver: { userId: 'user-1', name: 'ada' },
+          autonomy: 'L4',
+          sourceControl: sourceControl as SourceControlProvider,
+          ...route,
+        }) as MergeRoute,
+      record: async (entry) => {
+        audits.push(entry);
+      },
+    },
     log: () => {},
   };
 }
@@ -127,7 +145,7 @@ describe('Slack merge endpoint', () => {
     await handleSlackInteraction(signedRequest(interaction()), res, d);
     await d.settled();
     expect(d.responses.at(-1)!.body.text).toMatch(/changed since it was reviewed/);
-    expect(d.approvals[0]!.outcome).toMatch(/changed since review/);
+    expect(d.audits.at(-1)!.outcome).toMatch(/changed since review/);
   });
 
   // Read, merge and re-read could outlast Slack's three seconds, and Slack then
@@ -162,16 +180,35 @@ describe('Slack merge endpoint', () => {
     expect(mergePullRequest).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['another workspace', { team: 'T_OTHER' }, /workspace/],
-    ['someone who is not an approver', { user: 'U_RANDOM' }, /not an approver/],
-    ['a click outside the incident channel', { channel: 'C_ELSEWHERE' }, /outside the incident channel/],
-  ])('refuses %s', async (_label, overrides, reason) => {
+  it('refuses, and audits, a click the routing does not accept', async () => {
     const mergePullRequest = vi.fn(async () => merged());
     const { res, out } = capture();
-    await handleSlackInteraction(signedRequest(interaction(overrides)), res, deps({ getPullRequest: vi.fn(async () => openPr()) as never, mergePullRequest: mergePullRequest as never }));
+    const d = deps(
+      { getPullRequest: vi.fn(async () => openPr()) as never, mergePullRequest: mergePullRequest as never },
+      { ok: false, reason: 'the button was pressed outside the incident channel', organizationId: 'org-1' } as never,
+    );
+    await handleSlackInteraction(signedRequest(interaction()), res, d);
     expect(mergePullRequest).not.toHaveBeenCalled();
-    expect(out.body).toMatch(reason);
+    expect(out.body).toMatch(/outside the incident channel/);
+    expect(d.audits).toEqual([expect.objectContaining({ allowed: false, outcome: expect.stringMatching(/^refused/) })]);
+  });
+
+  it('refuses below L4 even for an approved click, and audits it', async () => {
+    const mergePullRequest = vi.fn(async () => merged());
+    const { res, out } = capture();
+    const d = deps({ getPullRequest: vi.fn(async () => openPr()) as never, mergePullRequest: mergePullRequest as never }, { autonomy: 'L3' });
+    await handleSlackInteraction(signedRequest(interaction()), res, d);
+    expect(out.status).toBe(403);
+    expect(mergePullRequest).not.toHaveBeenCalled();
+    expect(d.audits[0]).toMatchObject({ allowed: false, approverUserId: 'user-1' });
+  });
+
+  it('audits a merge against the person who clicked', async () => {
+    const { res } = capture();
+    const d = deps({ getPullRequest: vi.fn(async () => openPr()) as never, mergePullRequest: vi.fn(async () => merged()) as never });
+    await handleSlackInteraction(signedRequest(interaction()), res, d);
+    await d.settled();
+    expect(d.audits.at(-1)).toMatchObject({ allowed: true, outcome: 'merged', approverUserId: 'user-1', slackUserId: 'U_APPROVER', headSha: REVIEWED });
   });
 
   it('refuses to merge when the pull request state cannot be read', async () => {
@@ -187,6 +224,6 @@ describe('Slack merge endpoint', () => {
     await d.settled();
     expect(mergePullRequest).not.toHaveBeenCalled();
     expect(d.responses.at(-1)!.body.text).toMatch(/could not confirm/);
-    expect(d.approvals[0]?.outcome).toMatch(/^refused/);
+    expect(d.audits.at(-1)?.outcome).toMatch(/^refused/);
   });
 });

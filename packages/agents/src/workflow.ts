@@ -214,7 +214,49 @@ export interface WorkflowInput {
    * an observer must never be able to break the incident it is watching.
    */
   onStage?: (stage: WorkflowStage, summary: string) => void;
+  /**
+   * What an earlier, interrupted run of this incident already did. Each side effect
+   * named here is reused, not repeated: the incident row, the ticket, the Slack
+   * thread, the fix branch, the pull request.
+   */
+  resume?: WorkflowCheckpoint;
+  /**
+   * Called as each side effect lands, so a caller can persist it before the next one
+   * starts. A run killed between two checkpoints resumes from the later one.
+   */
+  onCheckpoint?: (checkpoint: WorkflowCheckpoint) => Promise<void> | void;
 }
+
+export interface WorkflowCheckpoint {
+  incidentId?: string;
+  issue?: { key: string; url: string };
+  slackThread?: { id: string; channel: string };
+  branch?: string;
+  pullRequest?: { number: number; url: string; headSha: string };
+}
+
+/**
+ * The incident's forward path through the state machine, as this workflow walks it.
+ *
+ * `advance` only moves forward along it, walking any intermediate states. A second
+ * repair pass (VALIDATING → FIXING, which the state machine forbids) and a resumed
+ * run (which may find the incident several states along) both land correctly
+ * instead of throwing.
+ */
+const FORWARD_PATH: IncidentState[] = [
+  'INCIDENT_OPEN',
+  'INVESTIGATING',
+  'ROOT_CAUSE_SUSPECTED',
+  'REPRODUCING',
+  'ROOT_CAUSE_CONFIRMED',
+  'FIXING',
+  'VALIDATING',
+  'FIX_READY',
+  'AWAITING_APPROVAL',
+  'APPROVED',
+  'DEPLOYING_FIX',
+  'VERIFYING_RECOVERY',
+];
 
 /**
  * Where the sandbox revision came from.
@@ -359,8 +401,24 @@ export class IncidentWorkflow {
     const advance = async (to: IncidentState, summary: string): Promise<void> => {
       const p = this.deps.persistence;
       if (!p || !result.incident) return;
-      result.incident = await p.engine.transition(result.incident.id, { to, summary, actor: 'agent:IncidentWorkflow' });
+      for (const state of forwardSteps(result.incident.state as IncidentState, to)) {
+        result.incident = await p.engine.transition(result.incident.id, {
+          to: state,
+          summary: state === to ? summary : `${summary} (passing through ${state})`,
+          actor: 'agent:IncidentWorkflow',
+        });
+      }
     };
+    const checkpoint = async (cp: WorkflowCheckpoint): Promise<void> => {
+      try {
+        await input.onCheckpoint?.(cp);
+      } catch (err) {
+        // Losing a checkpoint means a resumed run repeats this step. Say so; do not
+        // abandon the incident over it.
+        steps.push({ stage: result.stage, at: new Date(), summary: `Could not record a checkpoint: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    };
+    const resume = input.resume ?? {};
 
     const note = async (kind: string, summary: string): Promise<void> => {
       const p = this.deps.persistence;
@@ -418,7 +476,13 @@ export class IncidentWorkflow {
     // Open the incident before anything else happens, so every subsequent action is
     // recorded against it rather than floating free.
     const persistence = this.deps.persistence;
-    if (persistence) {
+    const resumed = persistence && resume.incidentId ? await persistence.engine.get(resume.incidentId) : null;
+    if (persistence && resumed) {
+      // An interrupted run opened this incident already; it is continued, not reopened.
+      result.incident = resumed;
+      await persistence.agentRuns.attachToIncident(preIncidentRuns, resumed.id);
+      await note('workflow_resumed', 'The worker restarted during this incident; continuing from where it stopped.');
+    } else if (persistence) {
       result.incident = await persistence.engine.open({
         organizationId: persistence.organizationId,
         serviceId: persistence.serviceId,
@@ -428,6 +492,7 @@ export class IncidentWorkflow {
       await persistence.agentRuns.attachToIncident(preIncidentRuns, result.incident.id);
       await this.recordAlertEvidence(persistence, result.incident.id, alert);
       await this.captureTelemetry(persistence, result.incident.id, alert, trace);
+      await checkpoint({ incidentId: result.incident.id });
       await advance('INVESTIGATING', describeAlert(alert));
       // A stack trace locates the failure. That is a suspicion, not a verdict.
       await advance(
@@ -439,6 +504,23 @@ export class IncidentWorkflow {
     }
 
     const incidentKey = input.incidentKey ?? result.incident?.key ?? `INC-${Date.now().toString(36).toUpperCase()}`;
+
+    // A run interrupted after its pull request was opened has nothing left to do
+    // but hand over; re-running the repair would open a second one.
+    if (resume.pullRequest) {
+      const pr = await trace('FixAgent', async (ctx) => {
+        const { value } = await ctx.tool('github.getPullRequest', { number: resume.pullRequest!.number }, () =>
+          this.deps.sourceControl.getPullRequest(input.repository, resume.pullRequest!.number),
+        );
+        return value;
+      });
+      result.pullRequest = pr;
+      result.slackThreadTs = resume.slackThread?.id ?? null;
+      if (resume.issue) result.issue = resume.issue;
+      step('awaiting_merge', `Resumed: #${pr.number} was already open.`);
+      await advance('AWAITING_APPROVAL', `Awaiting human review and merge of #${pr.number}.`);
+      return result;
+    }
 
     // ── 2b. What is production actually running? ─────────────────────────────
     //
@@ -550,7 +632,10 @@ export class IncidentWorkflow {
     }
 
     // ── 3. Issue tracker ─────────────────────────────────────────────────────
-    if (this.deps.issueTracker) {
+    if (resume.issue) {
+      result.issue = resume.issue;
+      step('ticket_opened', `Continuing ${resume.issue.key}.`);
+    } else if (this.deps.issueTracker) {
       this.assertAllowed(WORKFLOW_WRITE_TOOLS.createIssue!);
       const issue = await trace('IssueTracker', async (ctx) => {
         const { value } = await ctx.tool('issues.createIssue', { title }, () =>
@@ -565,6 +650,7 @@ export class IncidentWorkflow {
       });
       result.issue = { key: issue.key, url: issue.url };
       step('ticket_opened', `Opened ${issue.key}`, { url: issue.url });
+      await checkpoint({ issue: result.issue });
 
       // Walk the ticket through its workflow rather than jumping states. Real Jira
       // projects rarely allow To Do -> Resolved directly, and a ticket left in the
@@ -583,14 +669,25 @@ export class IncidentWorkflow {
     // ── 4. Slack ─────────────────────────────────────────────────────────────
     this.assertAllowed(WORKFLOW_WRITE_TOOLS.postMessage!);
     const comms = new CommunicationAgent(this.deps.messaging);
-    const thread = await trace('CommunicationAgent', (ctx) =>
-      comms.openThread(
-        ctx,
-        input.slackChannel,
-        this.openingMessage(alert, incidentKey, result.issue, revision, findings),
-      ),
-    );
-    step('team_notified', `Posted to ${input.slackChannel}`, { threadTs: thread.id });
+    let thread: { id: string; channel: string };
+    if (resume.slackThread) {
+      // The team already has a thread for this incident; say what happened in it.
+      thread = resume.slackThread;
+      await trace('CommunicationAgent', (ctx) =>
+        comms.reply(ctx, thread, 'The worker restarted during this incident. Continuing from where it stopped.'),
+      ).catch(() => undefined);
+      step('team_notified', `Continuing the thread in ${thread.channel}.`, { threadTs: thread.id });
+    } else {
+      thread = await trace('CommunicationAgent', (ctx) =>
+        comms.openThread(
+          ctx,
+          input.slackChannel,
+          this.openingMessage(alert, incidentKey, result.issue, revision, findings),
+        ),
+      );
+      step('team_notified', `Posted to ${input.slackChannel}`, { threadTs: thread.id });
+      await checkpoint({ slackThread: thread });
+    }
     result.slackThreadTs = thread.id;
 
     // ── 4b. Abstention is a complete outcome, not a failure ──────────────────
@@ -774,9 +871,13 @@ export class IncidentWorkflow {
       this.assertAllowed(WORKFLOW_WRITE_TOOLS.createPullRequest!);
       const branch = `pager/${incidentKey.toLowerCase()}`;
       const pr = await trace('FixAgent', async (ctx) => {
-        await ctx.tool('github.createBranch', { repo: input.repository, branch }, () =>
-          this.deps.sourceControl.createBranch(input.repository, revision.sha, branch),
-        );
+        // A resumed run whose branch was already made commits onto it.
+        if (resume.branch !== branch) {
+          await ctx.tool('github.createBranch', { repo: input.repository, branch }, () =>
+            this.deps.sourceControl.createBranch(input.repository, revision.sha, branch),
+          );
+          await checkpoint({ branch });
+        }
         await ctx.tool('github.commit', { repo: input.repository, branch }, () =>
           this.deps.sourceControl.commitFiles(input.repository, {
             branch,
@@ -817,6 +918,7 @@ export class IncidentWorkflow {
       });
 
       result.pullRequest = pr;
+      await checkpoint({ pullRequest: { number: pr.number, url: pr.url, headSha: pr.headSha } });
       step('pr_opened', `Opened #${pr.number}`, { url: pr.url });
       await advance('FIX_READY', `Pull request #${pr.number} opened: ${pr.url}`);
 
@@ -1931,4 +2033,18 @@ function normaliseRelative(dir: string, specifier: string): string | null {
     out.push(segment);
   }
   return out.length > 0 ? out.join('/') : null;
+}
+
+/**
+ * The transitions that take an incident from `from` to `to` along the forward path.
+ *
+ * Empty when `to` is already behind or at `from` (a repeat, or a second repair pass);
+ * several when a resumed run finds the incident further back than the step it is on.
+ * Off the path (UNRESOLVED, RESOLVED, …) it is the single direct transition.
+ */
+export function forwardSteps(from: IncidentState, to: IncidentState): IncidentState[] {
+  const a = FORWARD_PATH.indexOf(from);
+  const b = FORWARD_PATH.indexOf(to);
+  if (b === -1 || a === -1) return [to];
+  return b <= a ? [] : FORWARD_PATH.slice(a + 1, b + 1);
 }

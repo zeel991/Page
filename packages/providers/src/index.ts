@@ -16,3 +16,4 @@ export * from './github/app-client.js';
 export * from './slack/slack-app.js';
 export * from './deployed-revision.js';
 export * from './connection-tests.js';
+export * from './github/app-env.js';

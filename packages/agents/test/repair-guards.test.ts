@@ -56,7 +56,30 @@ const TEST_ERASING_PATCH: Omit<PatchProposal, 'kind'> = {
   confidence: 0.99,
 };
 
-async function harness(generator: PatchGenerator) {
+/** A real database behind the workflow, so every state change goes through the engine. */
+async function persistence() {
+  const db = await import('@pager/db');
+  const { IncidentEngine } = await import('../src/incident-engine.js');
+  const handle = await db.createDatabase('pglite://memory');
+  await db.migrate(handle);
+  const [org] = await handle.db.insert(db.organizations).values({ name: 'A', slug: 'a' }).returning();
+  const [svc] = await handle.db.insert(db.services).values({ organizationId: org!.id, name: 'checkout-api' }).returning();
+  const incidents = new db.IncidentRepository(handle.db);
+  return {
+    handle,
+    persistence: {
+      engine: new IncidentEngine(incidents, new db.TimelineRepository(handle.db), new db.AuditRepository(handle.db), db.incidentUnitOfWork(handle.db)),
+      evidence: new db.EvidenceRepository(handle.db),
+      agentRuns: new db.AgentRunRepository(handle.db),
+      telemetry: new db.TelemetryRepository(handle.db),
+      organizationId: org!.id,
+      serviceId: svc!.id,
+    },
+    sink: new db.DrizzleTelemetrySink(handle.db, { organizationId: org!.id }),
+  };
+}
+
+async function harness(generator: PatchGenerator, persisted: Awaited<ReturnType<typeof persistence>> | null = null) {
   server = new LocalTwinServer({ now: () => Date.parse('2026-09-13T14:45:00Z') });
   server.seed(seedFromFixture(INC_001));
   const e = await server.start();
@@ -72,10 +95,11 @@ async function harness(generator: PatchGenerator) {
     issueTracker: new JiraProvider({ baseUrl: e.jira, projectKey: 'INC' }),
     knowledge: new NotionProvider({ baseUrl: e.notion, token: 't', parentPageId: 'runbook-checkout' }),
     email: null,
-    tracer: new AgentTracer({ sink, lemma: null }),
+    tracer: new AgentTracer({ sink: persisted?.sink ?? sink, lemma: null }),
     // The evidence window ends at the present, so seeded telemetry needs a clock.
     now: () => new Date('2026-09-13T15:10:00Z'),
     patchGenerator: generator,
+    ...(persisted ? { persistence: persisted.persistence } : {}),
   });
 
   const tip = await sourceControl.listCommits(INC_001.repository, { limit: 1 });
@@ -211,6 +235,34 @@ describe('repair guards', () => {
     expect(result.repairAttempted).toBe(true);
     expect(result.haltReason).toBeNull();
     expect(result.pullRequest).not.toBeNull();
+  });
+
+  // The repair pass re-entered FIXING from FIXING, which the state machine forbids, so
+  // with a database behind the workflow one repair attempt crashed the whole run.
+  it('makes its repair attempt with the incident persisted, without an illegal transition', async () => {
+    let calls = 0;
+    const generator: PatchGenerator = {
+      kind: 'scripted',
+      async proposeRegressionTest(): Promise<RegressionTestProposal> {
+        return { kind: 'scripted', rationale: 'guard', ...goodTest };
+      },
+      async proposePatch(): Promise<PatchProposal> {
+        calls++;
+        return calls === 1
+          ? { ...TEST_ERASING_PATCH, kind: 'scripted', files: [{ path: 'src/checkout/service.ts', content: '// broken\nexport const nothing = 1;\n' }] }
+          : { ...TEST_ERASING_PATCH, kind: 'scripted', files: [{ path: 'src/checkout/service.ts', content: GOOD_PATCH }] };
+      },
+    };
+    const persisted = await persistence();
+    try {
+      const h = await harness(generator, persisted);
+      const result = await h.run();
+      expect(result.repairAttempted).toBe(true);
+      expect(result.pullRequest).not.toBeNull();
+      expect(result.incident!.state).toBe('AWAITING_APPROVAL');
+    } finally {
+      await persisted.handle.close();
+    }
   });
 
   it('stops after the repair attempt also fails, and opens no pull request', async () => {

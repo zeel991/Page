@@ -264,6 +264,9 @@ importers:
       '@pager/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@pager/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@pager/observability':
         specifier: workspace:*
         version: link:../../packages/observability

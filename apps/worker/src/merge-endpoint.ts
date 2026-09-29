@@ -21,10 +21,15 @@ import { PullRequestChangedError, type SourceControlProvider } from '@pager/prov
  * is really theirs, so nothing here trusts the payload until the signature checks
  * out.
  *
- * Order matters and is deliberate: verify, then parse, then authorise, then act.
- * Parsing before verifying would mean running a JSON decoder on unauthenticated
- * input; authorising before verifying would mean an attacker choosing the pull
- * request number.
+ * Order matters and is deliberate: verify, then parse, then route and authorise,
+ * then act. Parsing before verifying would mean running a JSON decoder on
+ * unauthenticated input; authorising before verifying would mean an attacker
+ * choosing the pull request number.
+ *
+ * One endpoint serves every workspace. A click is routed by its Slack team to the
+ * one workspace that installed the app into it; it counts only from that service's
+ * own channel, and only from an owner or admin of the workspace whose Slack identity
+ * is linked to their membership. Nothing about who may merge is configured by name.
  *
  * Slack abandons an interaction that is not answered within three seconds, and
  * reading, merging and re-reading a pull request can take longer. So everything
@@ -33,27 +38,47 @@ import { PullRequestChangedError, type SourceControlProvider } from '@pager/prov
  * `response_url`.
  */
 
-export interface MergeApproval {
-  id: string;
+export interface MergeClick {
+  teamId: string | undefined;
+  slackUserId: string | undefined;
+  channelId: string | undefined;
+  repository: string;
+  pullRequest: number;
+}
+
+export type MergeRoute =
+  | {
+      ok: true;
+      organizationId: string;
+      approver: { userId: string; name: string };
+      autonomy: AutonomyLevel;
+      sourceControl: SourceControlProvider;
+    }
+  | { ok: false; reason: string; organizationId: string | null };
+
+export interface MergeAuditEntry {
+  organizationId: string | null;
+  approvalId: string;
   repository: string;
   pullRequest: number;
   incidentKey: string;
-  approvedBy: string;
-  decidedAt: string;
+  headSha: string;
+  approverUserId: string | null;
+  slackUserId: string | null;
+  allowed: boolean;
   outcome: string;
+}
+
+/** Where a click belongs and who made it, resolved from the database. */
+export interface MergeRouting {
+  resolve(click: MergeClick): Promise<MergeRoute>;
+  /** Every decision, allowed or refused, lands in the workspace's audit log. */
+  record(entry: MergeAuditEntry): Promise<void>;
 }
 
 export interface MergeEndpointDeps {
   signingSecret: string;
-  enabled: boolean;
-  /** The operator's standing grant. Merging refuses below L4. */
-  autonomy: AutonomyLevel;
-  repository: string;
-  /** Only these people, in this workspace (and channel, when set), may merge. */
-  approvers: { teamId: string; userIds: readonly string[]; channelId: string | null };
-  sourceControl: SourceControlProvider;
-  /** Recorded approvals, newest first. Shown on the dashboard. */
-  approvals: MergeApproval[];
+  routing: MergeRouting;
   log: (message: string) => void;
   /** Posts a follow-up to Slack's response_url. Defaults to an HTTPS POST. */
   respond?: (responseUrl: string, body: object) => Promise<void>;
@@ -85,7 +110,7 @@ async function readBody(request: IncomingMessage, maxBytes = 256_000): Promise<s
 
 function reply(response: ServerResponse, status: number, text: string): void {
   response.writeHead(status, { 'content-type': 'application/json' });
-  response.end(JSON.stringify({ response_type: 'in_channel', replace_original: false, text }));
+  response.end(JSON.stringify({ response_type: 'in_channel', replace_original: false, text: toSlackMrkdwn(text) }));
 }
 
 /**
@@ -104,13 +129,6 @@ export async function handleSlackInteraction(
   response: ServerResponse,
   deps: MergeEndpointDeps,
 ): Promise<void> {
-  if (!deps.enabled) {
-    // Refused rather than ignored: a 404 here would look like a misconfigured URL
-    // when the truth is that this deployment deliberately does not offer merging.
-    reply(response, 403, 'This Pager Developer deployment does not offer merging from Slack.');
-    return;
-  }
-
   let rawBody: string;
   try {
     rawBody = await readBody(request);
@@ -160,53 +178,48 @@ export async function handleSlackInteraction(
     return;
   }
 
-  // 3. The approval is scoped to exactly one pull request in one repository, and
-  //    the repository is the one this worker watches — not one named by the payload.
-  if (target.repository !== deps.repository) {
-    deps.log(`REFUSED a merge for ${target.repository}: this worker watches ${deps.repository}`);
-    reply(response, 403, `This worker does not watch ${target.repository}.`);
-    return;
-  }
-
-  // 3b. Who is asking. The signature proves Slack sent this; it does not prove the
-  //     person may merge — anyone in the workspace can see the message. So the click
-  //     counts only from the configured workspace, channel and named approvers.
-  const teamId = interaction.team?.id ?? interaction.user?.team_id;
-  const userId = interaction.user?.id;
-  const refusal =
-    teamId !== deps.approvers.teamId
-      ? `workspace ${teamId ?? 'unknown'} is not the one this worker serves`
-      : deps.approvers.channelId && interaction.channel?.id !== deps.approvers.channelId
-        ? `the button was pressed outside the incident channel`
-        : !userId || !deps.approvers.userIds.includes(userId)
-          ? `${userId ?? 'an unknown user'} is not an approver for this worker`
-          : null;
-  if (refusal) {
-    deps.log(`REFUSED a merge of ${target.repository}#${target.pullRequest}: ${refusal}`);
-    reply(response, 200, `:no_entry: Not merged: ${refusal}.`);
-    return;
-  }
-
-  const approvedBy = interaction.user?.username ?? interaction.user?.name ?? interaction.user?.id ?? 'unknown';
-  const approval: MergeApproval = {
-    id: randomUUID(),
+  // 3. Route and identify. The signature proves Slack sent this; it does not prove
+  //    the person may merge — anyone in the Slack team can see the message.
+  const slackUserId = interaction.user?.id;
+  const approvalId = randomUUID();
+  const route = await deps.routing.resolve({
+    teamId: interaction.team?.id ?? interaction.user?.team_id,
+    slackUserId,
+    channelId: interaction.channel?.id,
     repository: target.repository,
     pullRequest: target.pullRequest,
-    incidentKey: target.incidentKey,
-    approvedBy,
-    decidedAt: new Date().toISOString(),
-    outcome: 'approved',
-  };
+  });
 
-  // 4. Authorise. The autonomy level is the operator's standing grant and the
-  //    approval is this person's decision about this pull request; neither
-  //    substitutes for the other, so both are required. Local, so it is decided
-  //    before the acknowledgement.
+  const audit = (entry: Pick<MergeAuditEntry, 'allowed' | 'outcome' | 'approverUserId'>) =>
+    deps.routing
+      .record({
+        organizationId: route.organizationId,
+        approvalId,
+        repository: target.repository,
+        pullRequest: target.pullRequest,
+        incidentKey: target.incidentKey,
+        headSha: target.headSha,
+        slackUserId: slackUserId ?? null,
+        ...entry,
+      })
+      .catch((err: unknown) => deps.log(`could not audit the merge decision: ${err instanceof Error ? err.message : String(err)}`));
+
+  if (!route.ok) {
+    deps.log(`REFUSED a merge of ${target.repository}#${target.pullRequest}: ${route.reason}`);
+    await audit({ allowed: false, outcome: `refused: ${route.reason}`, approverUserId: null });
+    reply(response, 200, `:no_entry: Not merged: ${route.reason}.`);
+    return;
+  }
+  const approvedBy = route.approver.name;
+
+  // 4. Authorise. The autonomy level is the workspace's standing grant and the click
+  //    is this person's decision about this pull request; neither substitutes for
+  //    the other, so both are required.
   try {
-    assertMergeAllowed(deps.autonomy, approval.id);
+    assertMergeAllowed(route.autonomy, approvalId);
   } catch (err) {
-    approval.outcome = `refused: ${err instanceof PermissionDeniedError ? err.reason : 'not permitted'}`;
-    deps.approvals.unshift(approval);
+    const reason = err instanceof PermissionDeniedError ? err.reason : 'not permitted';
+    await audit({ allowed: false, outcome: `refused: ${reason}`, approverUserId: route.approver.userId });
     reply(response, 403, `Refused: ${err instanceof Error ? err.message : 'not permitted'}`);
     return;
   }
@@ -227,32 +240,26 @@ export async function handleSlackInteraction(
       deps.log(`could not report the merge outcome to Slack: ${err instanceof Error ? err.message : String(err)}`);
     });
   // Usernames and GitHub's error text are not ours; only our own links survive.
-  const say = (text: string) =>
-    report({ response_type: 'in_channel', replace_original: false, text: toSlackMrkdwn(text) });
+  const say = (text: string) => report({ response_type: 'in_channel', replace_original: false, text: toSlackMrkdwn(text) });
   const replaceWith = (lines: string[], fallback: string) =>
     report({ replace_original: true, text: toSlackMrkdwn(fallback), blocks: outcomeBlocks(lines.map(toSlackMrkdwn)) });
+  const sourceControl = route.sourceControl;
+  const approverUserId = route.approver.userId;
 
   const work = (async () => {
-    // 6. Is the pull request still open, and still what was reviewed? A message stays
-    //    in the channel long after the decision it offered was taken, and clicking an
-    //    old one must not be an error the person has to interpret.
+    // 6. Is the pull request still open, and still what was reviewed?
     try {
-      const current = await deps.sourceControl.getPullRequest(target.repository, target.pullRequest);
+      const current = await sourceControl.getPullRequest(target.repository, target.pullRequest);
       if (current.state !== 'open') {
-        approval.outcome = `no action: already ${current.state}`;
-        deps.approvals.unshift(approval);
+        await audit({ allowed: false, outcome: `no action: already ${current.state}`, approverUserId });
         await replaceWith(
-          [
-            `:white_check_mark: *#${target.pullRequest} is already ${current.state}.*`,
-            `Nothing to do — someone decided this already.`,
-          ],
+          [`:white_check_mark: *#${target.pullRequest} is already ${current.state}.*`, `Nothing to do — someone decided this already.`],
           `#${target.pullRequest} is already ${current.state}.`,
         );
         return;
       }
       if (current.headSha !== target.headSha) {
-        approval.outcome = 'refused: pull request changed since review';
-        deps.approvals.unshift(approval);
+        await audit({ allowed: false, outcome: 'refused: pull request changed since review', approverUserId });
         deps.log(`REFUSED merging #${target.pullRequest}: head moved from ${target.headSha.slice(0, 12)} to ${current.headSha.slice(0, 12)}`);
         await say(changedSinceReview(target.pullRequest));
         return;
@@ -261,8 +268,7 @@ export async function handleSlackInteraction(
       // Fail closed. Without knowing the pull request's current state, merging could
       // act on something already closed or reopened with new commits.
       const message = err instanceof Error ? err.message : String(err);
-      approval.outcome = `refused: could not read the pull request (${message})`;
-      deps.approvals.unshift(approval);
+      await audit({ allowed: false, outcome: `refused: could not read the pull request (${message})`, approverUserId });
       deps.log(`REFUSED merging #${target.pullRequest}: could not read its state: ${message}`);
       await say(`:warning: Not merged: could not confirm the current state of #${target.pullRequest}. Try again, or merge on GitHub.`);
       return;
@@ -270,29 +276,24 @@ export async function handleSlackInteraction(
 
     // 7. Act, pinned to the reviewed commit.
     try {
-      const merged = await deps.sourceControl.mergePullRequest(target.repository, target.pullRequest, {
+      const merged = await sourceControl.mergePullRequest(target.repository, target.pullRequest, {
         method: 'squash',
         commitTitle: `${target.incidentKey}: merged by ${approvedBy} via Pager Developer`,
         sha: target.headSha,
       });
-      approval.outcome = merged.state === 'merged' ? 'merged' : `not merged (${merged.state})`;
-      deps.approvals.unshift(approval);
-      deps.log(`#${target.pullRequest} merged by ${approvedBy} — approval ${approval.id}`);
-      // The button is gone: the offer has been taken, and leaving it would invite a
-      // click that can only fail.
+      await audit({ allowed: true, outcome: merged.state === 'merged' ? 'merged' : `not merged (${merged.state})`, approverUserId });
+      deps.log(`#${target.pullRequest} merged by ${approvedBy} — approval ${approvalId}`);
       await replaceWith(
         [
           `:white_check_mark: *#${target.pullRequest} merged by ${approvedBy}.*`,
-          `Approval \`${approval.id}\` recorded against them. Pager Developer did not decide this.`,
+          `Approval \`${approvalId}\` recorded against them. Pager Developer did not decide this.`,
           slackLink(merged.url, 'View the pull request'),
         ],
         `#${target.pullRequest} merged by ${approvedBy}.`,
       );
     } catch (err) {
       if (err instanceof PullRequestChangedError) {
-        approval.outcome = 'refused: pull request changed since review';
-        deps.approvals.unshift(approval);
-        deps.log(`merge of #${target.pullRequest} refused by GitHub: head changed since review`);
+        await audit({ allowed: false, outcome: 'refused: pull request changed since review', approverUserId });
         await say(changedSinceReview(target.pullRequest));
         return;
       }
@@ -300,8 +301,7 @@ export async function handleSlackInteraction(
       // required check, branch protection. Surfaced as-is: that is a decision by the
       // repository, not a transient error to retry around.
       const message = err instanceof Error ? err.message : String(err);
-      approval.outcome = `merge failed: ${message}`;
-      deps.approvals.unshift(approval);
+      await audit({ allowed: false, outcome: `merge failed: ${message}`, approverUserId });
       deps.log(`merge of #${target.pullRequest} failed: ${message}`);
       await say(`:x: Could not merge #${target.pullRequest}: ${message}`);
     }
