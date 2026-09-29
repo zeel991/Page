@@ -598,7 +598,8 @@ async function tick(config: WorkerConfig, handled: Set<string>): Promise<void> {
             `*Patch authored by* ${result.patch?.kind === 'model' ? `model \`${result.investigation?.model ?? config.model}\`` : (result.patch?.kind ?? 'unknown')}`,
           ].join('\n'),
           pullRequestUrl: pr.url,
-          action: { repository: config.repository, pullRequest: pr.number, incidentKey },
+          // Pinned to the commit this message describes: anything pushed later needs its own review.
+          action: { repository: config.repository, pullRequest: pr.number, incidentKey, headSha: pr.headSha },
         }),
       )
       .catch((err: unknown) => {

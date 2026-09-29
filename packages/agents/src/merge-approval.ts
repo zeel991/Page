@@ -89,11 +89,16 @@ export function verifySlackSignature(input: {
   }
 }
 
-/** What a merge button carries. Narrow on purpose: one pull request, one repo. */
+/**
+ * What a merge button carries. Narrow on purpose: one pull request, one repo, and
+ * the one commit the message described. Without the commit, anything pushed to the
+ * branch after the message was posted would merge on a click that never saw it.
+ */
 export const MergeAction = z.object({
   repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'must be owner/name'),
   pullRequest: z.number().int().positive(),
   incidentKey: z.string().min(1),
+  headSha: z.string().regex(/^[0-9a-f]{40}$/i, 'must be a full commit sha'),
 });
 export type MergeAction = z.infer<typeof MergeAction>;
 

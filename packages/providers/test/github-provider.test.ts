@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GitHubProvider, UnsafeRepositoryPathError } from '../src/github/github-provider.js';
+import { GitHubProvider, PullRequestChangedError, UnsafeRepositoryPathError } from '../src/github/github-provider.js';
 import { ProviderHttpError } from '../src/http.js';
 
 type Route = (url: string, init: RequestInit) => { status?: number; body?: unknown } | undefined;
@@ -157,6 +157,71 @@ describe('GitHubProvider', () => {
 
     const real = new GitHubProvider({ baseUrl: 'https://api.github.com', token: 'tok', fetchImpl });
     expect(real.cloneUrl('acme/checkout-api')).toBe('https://x-access-token:tok@github.com/acme/checkout-api.git');
+  });
+});
+
+describe('GitHubProvider.mergePullRequest', () => {
+  const pr = (over: object = {}) => ({
+    number: 12, title: 't', body: '', head: { ref: 'pager/x', sha: 'a'.repeat(40) }, base: { ref: 'main' },
+    html_url: 'https://github.test/pull/12', state: 'closed', merged: true, merged_at: '2026-09-13T15:00:00Z',
+    merge_commit_sha: 'm'.repeat(40), ...over,
+  });
+
+  it('sends the reviewed sha', async () => {
+    let sent: { sha?: string } = {};
+    const { fetchImpl } = stubFetch([
+      (u, init) => {
+        if (init.method === 'PUT') {
+          sent = JSON.parse(String(init.body)) as { sha?: string };
+          return { body: { merged: true } };
+        }
+        return u.endsWith('/pulls/12') ? { body: pr() } : undefined;
+      },
+    ]);
+    const gh = new GitHubProvider({ baseUrl: 'https://api.github.test', token: 't', fetchImpl });
+    await gh.mergePullRequest('acme/checkout-api', 12, { sha: 'a'.repeat(40) });
+    expect(sent.sha).toBe('a'.repeat(40));
+  });
+
+  it('raises PullRequestChangedError on 409', async () => {
+    const { fetchImpl } = stubFetch([
+      (_u, init) => (init.method === 'PUT' ? { status: 409, body: { message: 'Head branch was modified.' } } : undefined),
+    ]);
+    const gh = new GitHubProvider({ baseUrl: 'https://api.github.test', token: 't', fetchImpl });
+    await expect(gh.mergePullRequest('acme/checkout-api', 12, { sha: 'a'.repeat(40) })).rejects.toBeInstanceOf(
+      PullRequestChangedError,
+    );
+  });
+
+  // The first PUT merged but its response was lost; the retry got 405, and the
+  // person was told "Could not merge" about a merge that had happened.
+  it('treats a retry refused because the first attempt landed as success', async () => {
+    let puts = 0;
+    const fetchImpl = (async (input: string | URL, init: RequestInit = {}) => {
+      if (init.method === 'PUT') {
+        puts++;
+        if (puts === 1) throw new TypeError('fetch failed');
+        return new Response(JSON.stringify({ message: 'Pull Request is not mergeable' }), { status: 405 });
+      }
+      return new Response(JSON.stringify(String(input).endsWith('/pulls/12') ? pr() : {}), { status: 200 });
+    }) as unknown as typeof fetch;
+    const gh = new GitHubProvider({ baseUrl: 'https://api.github.test', token: 't', fetchImpl });
+    const merged = await gh.mergePullRequest('acme/checkout-api', 12, { sha: 'a'.repeat(40) });
+    expect(puts).toBe(2);
+    expect(merged.state).toBe('merged');
+  });
+
+  it('still fails when the pull request is not in fact merged', async () => {
+    const { fetchImpl } = stubFetch([
+      (u, init) =>
+        init.method === 'PUT'
+          ? { status: 405, body: { message: 'Pull Request is not mergeable' } }
+          : u.endsWith('/pulls/12')
+            ? { body: pr({ state: 'open', merged: false, merged_at: null }) }
+            : undefined,
+    ]);
+    const gh = new GitHubProvider({ baseUrl: 'https://api.github.test', token: 't', fetchImpl });
+    await expect(gh.mergePullRequest('acme/checkout-api', 12)).rejects.toThrow(/405/);
   });
 });
 

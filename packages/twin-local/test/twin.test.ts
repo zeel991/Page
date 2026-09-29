@@ -106,6 +106,32 @@ describe('local GitHub twin', () => {
     expect(pr.state).toBe('open');
   });
 
+  it('refuses, with 409, a merge pinned to a head that has since moved', async () => {
+    // Real GitHub answers 409 when the sha in a merge request is not the head.
+    const { PullRequestChangedError } = await import('@pager/providers');
+    const gh = await github();
+    const history = await gh.listCommits('acme/checkout-api', { limit: 10 });
+    await gh.createBranch('acme/checkout-api', history[0]!.sha, 'pager/pinned');
+    const pr = await gh.createPullRequest('acme/checkout-api', {
+      title: 't', body: 'b', headRef: 'pager/pinned', baseRef: 'main',
+    });
+    const reviewed = pr.headSha;
+    // A commit lands on the branch after review.
+    await gh.commitFiles('acme/checkout-api', {
+      branch: 'pager/pinned', message: 'unreviewed', changes: [{ path: 'NOTES.md', content: 'x' }],
+    });
+
+    await expect(gh.mergePullRequest('acme/checkout-api', pr.number, { sha: reviewed })).rejects.toBeInstanceOf(
+      PullRequestChangedError,
+    );
+    expect((await gh.getPullRequest('acme/checkout-api', pr.number)).state).toBe('open');
+
+    const head = (await gh.getPullRequest('acme/checkout-api', pr.number)).headSha;
+    const merged = await gh.mergePullRequest('acme/checkout-api', pr.number, { sha: head });
+    expect(merged.state).toBe('merged');
+    expect(merged.mergedAt).toEqual(new Date('2026-09-13T14:45:00Z'));
+  });
+
   it('refuses a branch that already exists', async () => {
     const gh = await github();
     const history = await gh.listCommits('acme/checkout-api', { limit: 10 });

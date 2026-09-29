@@ -122,7 +122,7 @@ describe('merge permission', () => {
 
 describe('merge action payload', () => {
   it('round-trips a well-formed action', () => {
-    const action = { repository: 'he11world/test', pullRequest: 4, incidentKey: 'INC-BE5404871B81' };
+    const action = { repository: 'he11world/test', pullRequest: 4, incidentKey: 'INC-BE5404871B81', headSha: 'a'.repeat(40) };
     const blocks = mergeButtonBlocks({
       headline: 'Fix ready', summary: 'reproduced and verified',
       pullRequestUrl: 'https://github.com/he11world/test/pull/4', action,
@@ -135,6 +135,12 @@ describe('merge action payload', () => {
     expect(() => decodeMergeAction('{"repository":"../../etc","pullRequest":1,"incidentKey":"X"}')).toThrow();
   });
 
+  // A button without the reviewed commit would merge whatever the branch holds at click time.
+  it('refuses an action that does not pin the reviewed commit', () => {
+    expect(() => decodeMergeAction('{"repository":"a/b","pullRequest":1,"incidentKey":"X"}')).toThrow();
+    expect(() => decodeMergeAction('{"repository":"a/b","pullRequest":1,"incidentKey":"X","headSha":"main"}')).toThrow();
+  });
+
   it('refuses an action with no pull request number', () => {
     expect(() => decodeMergeAction('{"repository":"a/b","incidentKey":"X"}')).toThrow();
   });
@@ -144,7 +150,7 @@ describe('merge action payload', () => {
     // ship code.
     const blocks = mergeButtonBlocks({
       headline: 'h', summary: 's', pullRequestUrl: 'https://example.com',
-      action: { repository: 'a/b', pullRequest: 1, incidentKey: 'X' },
+      action: { repository: 'a/b', pullRequest: 1, incidentKey: 'X', headSha: 'a'.repeat(40) },
     }) as { type: string; elements?: { action_id?: string; confirm?: unknown }[] }[];
     const button = blocks.find((b) => b.type === 'actions')!.elements!.find((e) => e.action_id === 'pager_merge_pull_request')!;
     expect(button.confirm).toBeDefined();

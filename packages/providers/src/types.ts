@@ -101,7 +101,15 @@ export interface SourceControlProvider {
   mergePullRequest(
     repo: string,
     number: number,
-    opts?: { method?: 'merge' | 'squash' | 'rebase'; commitTitle?: string },
+    opts?: {
+      method?: 'merge' | 'squash' | 'rebase';
+      commitTitle?: string;
+      /**
+       * The head commit the approver reviewed. The merge is refused, with
+       * `PullRequestChangedError`, if the branch has moved since.
+       */
+      sha?: string;
+    },
   ): Promise<PullRequest>;
   /** Clone URL for the reproduction sandbox. May embed a twin credential. */
   cloneUrl(repo: string): string;

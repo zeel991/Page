@@ -95,6 +95,21 @@ const FILE_STATUS: Record<string, ChangedFile['status']> = {
  * any other `/repos/...` the token can see. Each value is validated and encoded,
  * so a path can only ever name something inside the repository it was asked about.
  */
+/** The pull request's head moved after it was reviewed; GitHub refused the merge (409). */
+export class PullRequestChangedError extends Error {
+  constructor(
+    readonly pullRequest: number,
+    readonly reviewedSha: string | null,
+  ) {
+    super(
+      `#${pullRequest} changed since it was reviewed` +
+        (reviewedSha ? ` (reviewed at ${reviewedSha.slice(0, 12)})` : '') +
+        `; GitHub refused to merge a head nobody approved.`,
+    );
+    this.name = 'PullRequestChangedError';
+  }
+}
+
 export class UnsafeRepositoryPathError extends Error {
   constructor(what: string, value: string) {
     super(`Refusing unsafe ${what}: ${JSON.stringify(value)}`);
@@ -349,19 +364,36 @@ export class GitHubProvider implements SourceControlProvider {
    * required check, a branch protection rule. That is surfaced rather than retried:
    * a merge that the repository's own rules refuse is a decision, not a transient
    * failure, and working around it would defeat the point of having the rules.
+   *
+   * With `sha`, GitHub merges only if the head is still that commit and answers 409
+   * otherwise, which is raised as `PullRequestChangedError`.
+   *
+   * A PUT that failed in transit is retried, and if the first attempt in fact landed
+   * the retry is refused with 405 "not mergeable" — because it is merged. So any
+   * failure is followed by a read: merged at the expected head is success.
    */
   async mergePullRequest(
     repo: string,
     number: number,
-    opts: { method?: 'merge' | 'squash' | 'rebase'; commitTitle?: string } = {},
+    opts: { method?: 'merge' | 'squash' | 'rebase'; commitTitle?: string; sha?: string } = {},
   ): Promise<PullRequest> {
-    await this.http.put<{ merged: boolean; sha?: string; message?: string }>(
-      `/repos/${repoPath(repo)}/pulls/${segment(String(number))}/merge`,
-      {
-        merge_method: opts.method ?? 'squash',
-        ...(opts.commitTitle ? { commit_title: opts.commitTitle } : {}),
-      },
-    );
+    try {
+      await this.http.put<{ merged: boolean; sha?: string; message?: string }>(
+        `/repos/${repoPath(repo)}/pulls/${segment(String(number))}/merge`,
+        {
+          merge_method: opts.method ?? 'squash',
+          ...(opts.commitTitle ? { commit_title: opts.commitTitle } : {}),
+          ...(opts.sha ? { sha: opts.sha } : {}),
+        },
+      );
+    } catch (err) {
+      if (err instanceof ProviderHttpError && err.status === 409) {
+        throw new PullRequestChangedError(number, opts.sha ?? null);
+      }
+      const after = await this.getPullRequest(repo, number).catch(() => null);
+      if (after?.state === 'merged' && (!opts.sha || after.headSha === opts.sha)) return after;
+      throw err;
+    }
     // Read the pull request back rather than trusting the merge response: the
     // authoritative record of what happened is the pull request's own state.
     return this.getPullRequest(repo, number);

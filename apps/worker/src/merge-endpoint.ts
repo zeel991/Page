@@ -9,7 +9,7 @@ import {
   verifySlackSignature,
 } from '@pager/agents';
 import { PermissionDeniedError, type AutonomyLevel } from '@pager/core';
-import type { SourceControlProvider } from '@pager/providers';
+import { PullRequestChangedError, type SourceControlProvider } from '@pager/providers';
 
 /**
  * The Slack interaction that merges a pull request.
@@ -23,6 +23,12 @@ import type { SourceControlProvider } from '@pager/providers';
  * Parsing before verifying would mean running a JSON decoder on unauthenticated
  * input; authorising before verifying would mean an attacker choosing the pull
  * request number.
+ *
+ * Slack abandons an interaction that is not answered within three seconds, and
+ * reading, merging and re-reading a pull request can take longer. So everything
+ * local is decided before answering, the click is acknowledged at once, and the
+ * GitHub work runs afterwards and reports back through the interaction's
+ * `response_url`.
  */
 
 export interface MergeApproval {
@@ -47,6 +53,23 @@ export interface MergeEndpointDeps {
   /** Recorded approvals, newest first. Shown on the dashboard. */
   approvals: MergeApproval[];
   log: (message: string) => void;
+  /** Posts a follow-up to Slack's response_url. Defaults to an HTTPS POST. */
+  respond?: (responseUrl: string, body: object) => Promise<void>;
+  /** Runs the work that happens after the acknowledgement. Injected in tests. */
+  background?: (work: Promise<void>) => void;
+}
+
+/** Slack's response URLs live here; nothing else is posted to. */
+const RESPONSE_URL = /^https:\/\/hooks\.slack\.com\//;
+
+async function postToResponseUrl(responseUrl: string, body: object): Promise<void> {
+  const res = await fetch(responseUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`Slack response_url answered ${res.status}`);
 }
 
 async function readBody(request: IncomingMessage, maxBytes = 256_000): Promise<string> {
@@ -64,17 +87,12 @@ function reply(response: ServerResponse, status: number, text: string): void {
 }
 
 /**
- * Replace the message the button lived on.
+ * The message the button lived on is replaced once a decision is taken.
  *
  * Once a pull request is merged the button is not merely useless, it is misleading:
  * it invites a click that can only fail, and it leaves the channel showing an
  * outstanding decision that was in fact taken. The outcome replaces the offer.
  */
-function replaceMessage(response: ServerResponse, blocks: unknown[], fallback: string): void {
-  response.writeHead(200, { 'content-type': 'application/json' });
-  response.end(JSON.stringify({ replace_original: true, text: fallback, blocks }));
-}
-
 function outcomeBlocks(lines: string[]): unknown[] {
   return [{ type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') } }];
 }
@@ -178,38 +196,10 @@ export async function handleSlackInteraction(
     outcome: 'approved',
   };
 
-  // 4. Is the pull request still open? A message stays in the channel long after
-  //    the decision it offered was taken, and clicking an old one must not be an
-  //    error the person has to interpret — it means someone already decided.
-  try {
-    const current = await deps.sourceControl.getPullRequest(target.repository, target.pullRequest);
-    if (current.state !== 'open') {
-      approval.outcome = `no action: already ${current.state}`;
-      deps.approvals.unshift(approval);
-      replaceMessage(
-        response,
-        outcomeBlocks([
-          `:white_check_mark: *#${target.pullRequest} is already ${current.state}.*`,
-          `Nothing to do — someone decided this already.`,
-        ]),
-        `#${target.pullRequest} is already ${current.state}.`,
-      );
-      return;
-    }
-  } catch (err) {
-    // Fail closed. Without knowing the pull request's current state, merging could
-    // act on something already closed or reopened with new commits.
-    const message = err instanceof Error ? err.message : String(err);
-    approval.outcome = `refused: could not read the pull request (${message})`;
-    deps.approvals.unshift(approval);
-    deps.log(`REFUSED merging #${target.pullRequest}: could not read its state: ${message}`);
-    reply(response, 200, `:warning: Not merged: could not confirm the current state of #${target.pullRequest}. Try again, or merge on GitHub.`);
-    return;
-  }
-
-  // 5. Authorise. The autonomy level is the operator's standing grant and the
+  // 4. Authorise. The autonomy level is the operator's standing grant and the
   //    approval is this person's decision about this pull request; neither
-  //    substitutes for the other, so both are required.
+  //    substitutes for the other, so both are required. Local, so it is decided
+  //    before the acknowledgement.
   try {
     assertMergeAllowed(deps.autonomy, approval.id);
   } catch (err) {
@@ -219,34 +209,106 @@ export async function handleSlackInteraction(
     return;
   }
 
-  // 6. Act.
-  try {
-    const merged = await deps.sourceControl.mergePullRequest(target.repository, target.pullRequest, {
-      method: 'squash',
-      commitTitle: `${target.incidentKey}: merged by ${approvedBy} via Pager Developer`,
-    });
-    approval.outcome = merged.state === 'merged' ? 'merged' : `not merged (${merged.state})`;
-    deps.approvals.unshift(approval);
-    deps.log(`#${target.pullRequest} merged by ${approvedBy} — approval ${approval.id}`);
-    // The button is gone: the offer has been taken, and leaving it would invite a
-    // click that can only fail.
-    replaceMessage(
-      response,
-      outcomeBlocks([
-        `:white_check_mark: *#${target.pullRequest} merged by ${approvedBy}.*`,
-        `Approval \`${approval.id}\` recorded against them. Pager Developer did not decide this.`,
-        `<${merged.url}|View the pull request>`,
-      ]),
-      `#${target.pullRequest} merged by ${approvedBy}.`,
-    );
-  } catch (err) {
-    // GitHub answers 405 when its own rules refuse the merge — conflicts, a failing
-    // required check, branch protection. Surfaced as-is: that is a decision by the
-    // repository, not a transient error to retry around.
-    const message = err instanceof Error ? err.message : String(err);
-    approval.outcome = `merge failed: ${message}`;
-    deps.approvals.unshift(approval);
-    deps.log(`merge of #${target.pullRequest} failed: ${message}`);
-    reply(response, 200, `:x: Could not merge #${target.pullRequest}: ${message}`);
+  const responseUrl = interaction.response_url;
+  if (!responseUrl || !RESPONSE_URL.test(responseUrl)) {
+    // Without somewhere to report the outcome, nobody would learn whether it merged.
+    reply(response, 400, 'This interaction carried no Slack response URL to report back to.');
+    return;
   }
+
+  // 5. Acknowledge now; Slack gives up after three seconds.
+  reply(response, 200, `:hourglass_flowing_sand: Merging #${target.pullRequest} for ${approvedBy}…`);
+
+  const send = deps.respond ?? postToResponseUrl;
+  const report = (body: object) =>
+    send(responseUrl, body).catch((err: unknown) => {
+      deps.log(`could not report the merge outcome to Slack: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  const say = (text: string) => report({ response_type: 'in_channel', replace_original: false, text });
+  const replaceWith = (lines: string[], fallback: string) =>
+    report({ replace_original: true, text: fallback, blocks: outcomeBlocks(lines) });
+
+  const work = (async () => {
+    // 6. Is the pull request still open, and still what was reviewed? A message stays
+    //    in the channel long after the decision it offered was taken, and clicking an
+    //    old one must not be an error the person has to interpret.
+    try {
+      const current = await deps.sourceControl.getPullRequest(target.repository, target.pullRequest);
+      if (current.state !== 'open') {
+        approval.outcome = `no action: already ${current.state}`;
+        deps.approvals.unshift(approval);
+        await replaceWith(
+          [
+            `:white_check_mark: *#${target.pullRequest} is already ${current.state}.*`,
+            `Nothing to do — someone decided this already.`,
+          ],
+          `#${target.pullRequest} is already ${current.state}.`,
+        );
+        return;
+      }
+      if (current.headSha !== target.headSha) {
+        approval.outcome = 'refused: pull request changed since review';
+        deps.approvals.unshift(approval);
+        deps.log(`REFUSED merging #${target.pullRequest}: head moved from ${target.headSha.slice(0, 12)} to ${current.headSha.slice(0, 12)}`);
+        await say(changedSinceReview(target.pullRequest));
+        return;
+      }
+    } catch (err) {
+      // Fail closed. Without knowing the pull request's current state, merging could
+      // act on something already closed or reopened with new commits.
+      const message = err instanceof Error ? err.message : String(err);
+      approval.outcome = `refused: could not read the pull request (${message})`;
+      deps.approvals.unshift(approval);
+      deps.log(`REFUSED merging #${target.pullRequest}: could not read its state: ${message}`);
+      await say(`:warning: Not merged: could not confirm the current state of #${target.pullRequest}. Try again, or merge on GitHub.`);
+      return;
+    }
+
+    // 7. Act, pinned to the reviewed commit.
+    try {
+      const merged = await deps.sourceControl.mergePullRequest(target.repository, target.pullRequest, {
+        method: 'squash',
+        commitTitle: `${target.incidentKey}: merged by ${approvedBy} via Pager Developer`,
+        sha: target.headSha,
+      });
+      approval.outcome = merged.state === 'merged' ? 'merged' : `not merged (${merged.state})`;
+      deps.approvals.unshift(approval);
+      deps.log(`#${target.pullRequest} merged by ${approvedBy} — approval ${approval.id}`);
+      // The button is gone: the offer has been taken, and leaving it would invite a
+      // click that can only fail.
+      await replaceWith(
+        [
+          `:white_check_mark: *#${target.pullRequest} merged by ${approvedBy}.*`,
+          `Approval \`${approval.id}\` recorded against them. Pager Developer did not decide this.`,
+          `<${merged.url}|View the pull request>`,
+        ],
+        `#${target.pullRequest} merged by ${approvedBy}.`,
+      );
+    } catch (err) {
+      if (err instanceof PullRequestChangedError) {
+        approval.outcome = 'refused: pull request changed since review';
+        deps.approvals.unshift(approval);
+        deps.log(`merge of #${target.pullRequest} refused by GitHub: head changed since review`);
+        await say(changedSinceReview(target.pullRequest));
+        return;
+      }
+      // GitHub answers 405 when its own rules refuse the merge — conflicts, a failing
+      // required check, branch protection. Surfaced as-is: that is a decision by the
+      // repository, not a transient error to retry around.
+      const message = err instanceof Error ? err.message : String(err);
+      approval.outcome = `merge failed: ${message}`;
+      deps.approvals.unshift(approval);
+      deps.log(`merge of #${target.pullRequest} failed: ${message}`);
+      await say(`:x: Could not merge #${target.pullRequest}: ${message}`);
+    }
+  })();
+
+  (deps.background ?? ((p) => void p.catch((err: unknown) => deps.log(`merge work failed: ${String(err)}`))))(work);
+}
+
+function changedSinceReview(pullRequest: number): string {
+  return (
+    `:warning: Not merged: #${pullRequest} changed since it was reviewed — commits were pushed after ` +
+    `this message was posted, and nobody has approved them. Review the new head on GitHub.`
+  );
 }

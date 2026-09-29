@@ -405,6 +405,11 @@ export function githubRoutes(): Route[] {
         if (pr.merged || pr.state === 'closed') {
           return { status: 405, body: { message: 'Pull Request is not mergeable' } };
         }
+        // GitHub refuses a merge pinned to a head that has since moved.
+        const pinned = (ctx.json as { sha?: string } | undefined)?.sha;
+        if (pinned && pinned !== pr.headSha) {
+          return { status: 409, body: { message: 'Head branch was modified. Review and try the merge again.' } };
+        }
         pr.merged = true;
         pr.state = 'closed';
         pr.mergedAt = new Date(ctx.now()).toISOString();
