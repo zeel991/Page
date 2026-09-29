@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SourceControlProvider } from '@pager/providers';
+import { ProtectedPathError, protectedPathReason } from './patch-policy.js';
 
 /**
  * An isolated working copy.
@@ -143,6 +144,28 @@ export class Sandbox {
     const target = this.safePath(path);
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, content, 'utf8');
+  }
+
+  /**
+   * Write a patch, refusing it whole if any file is one a patch may not touch.
+   *
+   * Every file is checked before any is written, so a refused patch leaves the tree
+   * as it was. Returns each path's prior content (null when it did not exist), so
+   * the caller can restore the tree.
+   */
+  async writePatch(
+    files: readonly { path: string; content: string }[],
+    opts: { regressionTestPath?: string | null } = {},
+  ): Promise<Map<string, string | null>> {
+    const prior = new Map<string, string | null>();
+    for (const file of files) {
+      const before = await this.readFile(file.path);
+      const reason = protectedPathReason(file.path, before, file.content, opts);
+      if (reason) throw new ProtectedPathError(file.path, reason);
+      if (!prior.has(file.path)) prior.set(file.path, before);
+    }
+    for (const file of files) await this.writeFile(file.path, file.content);
+    return prior;
   }
 
   async readFile(path: string): Promise<string | null> {

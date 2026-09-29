@@ -13,6 +13,7 @@ import type {
   TimeRange,
 } from '@pager/providers';
 import {
+  ProtectedPathError,
   ReproductionAgent,
   Sandbox,
   ValidationEngine,
@@ -20,6 +21,7 @@ import {
   describeReproduction,
   profileRepository,
   singleTestCommand,
+  testCountRegression,
   type ReproductionAttempt,
   type ValidationRun,
 } from '@pager/sandbox';
@@ -741,6 +743,7 @@ export class IncidentWorkflow {
         attempt,
         profile,
         test: proposedTest,
+        preexisting,
         step,
         advance,
       });
@@ -1449,6 +1452,8 @@ export class IncidentWorkflow {
     attempt: ReproductionAttempt;
     profile: Awaited<ReturnType<typeof profileRepository>>;
     test: RegressionTestProposal;
+    /** The suite at the deployed revision, before anything was added. */
+    preexisting: ValidationRun;
     step: (stage: WorkflowStage, summary: string, detail?: Record<string, unknown>) => void;
     advance: (to: IncidentState, summary: string) => Promise<void>;
   }): Promise<{
@@ -1512,16 +1517,23 @@ export class IncidentWorkflow {
         else await sandbox.writeFile(path, content);
       }
 
+      // The rest of what a patch may not touch — scripts, lockfiles, existing tests,
+      // CI and runner config, dotfiles — is refused by the sandbox as it writes.
+      let prior: Map<string, string | null>;
+      try {
+        prior = await sandbox.writePatch(patch.files, { regressionTestPath: test.path });
+      } catch (err) {
+        if (!(err instanceof ProtectedPathError)) throw err;
+        return { ok: false, reason: err.message, patch, reproduction: null, validation: [], repairAttempted };
+      }
+      for (const [path, content] of prior) if (!pristine.has(path)) pristine.set(path, content);
+
       step('patching', `Applying a ${patch.kind} patch to ${patch.files.length} file(s).`, {
         rootCause: patch.rootCause,
         pass: pass + 1,
       });
       await advance('FIXING', `Applying a ${patch.kind} patch: ${patch.rootCause}`);
 
-      for (const file of patch.files) {
-        if (!pristine.has(file.path)) pristine.set(file.path, await sandbox.readFile(file.path));
-        await sandbox.writeFile(file.path, file.content);
-      }
 
       const confirmed = await reproduction.confirmFix(attempt);
       if (!confirmed.proven) {
@@ -1550,6 +1562,28 @@ export class IncidentWorkflow {
         ran: summary.runs.filter((r) => !r.skipped).map((r) => r.kind),
         skipped: summary.skipped,
       });
+
+      // A passing suite proves little if the patch made it smaller. Counted against
+      // the run at the deployed revision, before anything was added.
+      const shrunk = summary.allPassed
+        ? testCountRegression(
+            { passed: args.preexisting.testsPassed, failed: args.preexisting.testsFailed },
+            (() => {
+              const t = summary.runs.find((r) => r.kind === 'test' && !r.skipped);
+              return { passed: t?.testsPassed ?? null, failed: t?.testsFailed ?? null };
+            })(),
+          )
+        : null;
+      if (shrunk) {
+        return {
+          ok: false,
+          reason: `Patch rejected: ${shrunk}. The patch is not offered for merge.`,
+          patch,
+          reproduction: confirmed,
+          validation: runs,
+          repairAttempted,
+        };
+      }
 
       if (summary.allPassed) {
         return { ok: true, reason: null, patch, reproduction: confirmed, validation: runs, repairAttempted };

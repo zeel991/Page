@@ -132,6 +132,27 @@ describe('repair guards', () => {
     expect(server.current.repositories.get(INC_001.repository)!.pullRequests).toHaveLength(1);
   });
 
+  // Only the regression test path used to be protected, so a patch could pass its
+  // own checks by disabling them.
+  it.each([
+    ['rewrites the test script', { path: 'package.json', content: JSON.stringify({ name: 'checkout-api', type: 'module', scripts: { test: 'true' } }) }, /package\.json "scripts"/],
+    ['empties an existing test', { path: 'test/checkout.test.ts', content: '' }, /an existing test/],
+    ['edits CI', { path: '.github/workflows/ci.yml', content: 'on: push\n' }, /dotfile/],
+    ['touches the lockfile', { path: 'package-lock.json', content: '{}' }, /lockfile/],
+    ['relaxes the runner config', { path: 'vitest.config.ts', content: 'export default {}' }, /test-runner configuration/],
+  ])('refuses a patch that %s', async (_label, extra, reason) => {
+    const h = await harness(
+      new ScriptedPatchGenerator({
+        regressionTest: goodTest,
+        patch: { ...TEST_ERASING_PATCH, files: [{ path: 'src/checkout/service.ts', content: GOOD_PATCH }, extra] },
+      }),
+    );
+    const result = await h.run();
+    expect(result.stage).toBe('halted');
+    expect(result.haltReason).toMatch(reason);
+    expect(result.pullRequest).toBeNull();
+  });
+
   it('refuses a regression test that would overwrite an existing file', async () => {
     const h = await harness(
       new ScriptedPatchGenerator({
