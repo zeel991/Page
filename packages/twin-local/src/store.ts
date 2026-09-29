@@ -192,6 +192,17 @@ export interface TwinState {
   limits?: { treeEntries?: number; inlineFileBytes?: number };
   /** Notion databases, each naming its title property as Notion lets a workspace. */
   databases?: { id: string; titleProperty: string }[];
+  /**
+   * The Slack workspace the twin plays, the app it accepts OAuth from, and the bot
+   * tokens and codes it has issued.
+   */
+  slack: {
+    team: { id: string; name: string };
+    app: { clientId: string; clientSecret: string };
+    users: { id: string; name: string; email: string | null }[];
+    codes: Map<string, true>;
+    botTokens: Set<string>;
+  };
 }
 
 /** Content-addressed sha, so the same seed always produces the same history. */
@@ -317,6 +328,13 @@ export function emptyState(): TwinState {
     blobs: new Map(),
     trees: new Map(),
     emails: [],
+    slack: {
+      team: { id: 'T0TWIN', name: 'Acme' },
+      app: { clientId: 'twin-slack-client', clientSecret: 'twin-slack-secret' },
+      users: [{ id: 'U0OCTO', name: 'octo', email: 'octo@acme.dev' }],
+      codes: new Map(),
+      botTokens: new Set(),
+    },
   };
 }
 
@@ -352,5 +370,12 @@ export function cloneState(state: TwinState): TwinState {
     emails: state.emails.map((e) => ({ ...e, to: [...e.to] })),
     ...(state.limits ? { limits: { ...state.limits } } : {}),
     ...(state.databases ? { databases: state.databases.map((d) => ({ ...d })) } : {}),
+    slack: {
+      team: { ...state.slack.team },
+      app: { ...state.slack.app },
+      users: state.slack.users.map((u) => ({ ...u })),
+      codes: new Map(state.slack.codes),
+      botTokens: new Set(state.slack.botTokens),
+    },
   };
 }

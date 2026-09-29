@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { LocalKeyWrapper, signToken } from '@pager/core';
 import { CredentialVault, IdentityRepository, createDatabase, migrate, type DatabaseHandle } from '@pager/db';
-import { GitHubAppClient, PAGER_APP_MANIFEST, registerViaManifest } from '@pager/providers';
+import { GitHubAppClient, PAGER_APP_MANIFEST, SlackAppClient, registerViaManifest } from '@pager/providers';
 import { INC_001, LocalTwinServer, seedFromFixture } from '@pager/twin-local';
 import { buildApp, type AppDeps } from '../src/app.ts';
 
@@ -19,10 +19,11 @@ export interface Harness {
   twin: LocalTwinServer;
   endpoints: Awaited<ReturnType<LocalTwinServer['start']>>;
   github: GitHubAppClient;
+  slack: SlackAppClient;
   vault: CredentialVault;
   close(): Promise<void>;
   /** Sign in as a GitHub user and return a session for their first workspace. */
-  signIn(login: string, subject: string): Promise<{ userId: string; org: string; token: string }>;
+  signIn(login: string, subject: string, email?: string | null): Promise<{ userId: string; org: string; token: string }>;
   call(method: string, url: string, token: string, payload?: unknown): ReturnType<FastifyInstance['inject']>;
 }
 
@@ -47,18 +48,23 @@ export async function harness(extra: Partial<AppDeps> = {}): Promise<Harness> {
   const handle = await createDatabase('pglite://memory');
   await migrate(handle);
   const vault = new CredentialVault(handle.db, new LocalKeyWrapper(randomBytes(32).toString('base64')));
-  const app = await buildApp({ db: handle.db, sessionSecret: SECRET, webOrigin: 'http://console.test', vault, github, ...extra });
+  const slack = new SlackAppClient({ clientId: 'twin-slack-client', clientSecret: 'twin-slack-secret', baseUrl: endpoints.slack });
+  const app = await buildApp({
+    db: handle.db, sessionSecret: SECRET, webOrigin: 'http://console.test', vault, github,
+    slack: { client: slack, redirectUri: 'http://console.test/onboarding/slack/callback' },
+    ...extra,
+  });
   const identity = new IdentityRepository(handle.db);
 
   return {
-    app, handle, twin, endpoints, github, vault,
+    app, handle, twin, endpoints, github, slack, vault,
     async close() {
       await app.close();
       await handle.close();
       await twin.stop();
     },
-    async signIn(login, subject) {
-      const { user, workspaces } = await identity.signIn({ provider: 'github', subject, login, email: null, name: login, avatarUrl: null });
+    async signIn(login, subject, email = null) {
+      const { user, workspaces } = await identity.signIn({ provider: 'github', subject, login, email, name: login, avatarUrl: null });
       const org = workspaces[0]!.id;
       return { userId: user.id, org, token: signToken(SECRET, 'api-session', { sub: user.id, org }, 600) };
     },
@@ -89,4 +95,11 @@ export async function installThroughGitHub(installUrl: string, opts: { login?: s
     state: location.searchParams.get('state')!,
     code: location.searchParams.get('code')!,
   };
+}
+
+/** Follow Slack's consent redirect back to the console, as a browser would. */
+export async function installThroughSlack(installUrl: string) {
+  const res = await fetch(installUrl, { redirect: 'manual' });
+  const location = new URL(res.headers.get('location')!);
+  return { code: location.searchParams.get('code')!, state: location.searchParams.get('state')! };
 }

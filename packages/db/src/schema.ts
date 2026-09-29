@@ -149,6 +149,21 @@ export const githubInstallations = pgTable('github_installations', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex('github_installations_installation_idx').on(t.installationId)]);
 
+/**
+ * The Slack team a workspace installed the app into. A team belongs to at most one
+ * workspace, because a merge click is routed to a workspace by its team id.
+ */
+export const slackInstallations = pgTable('slack_installations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  teamId: text('team_id').notNull(),
+  teamName: text('team_name').notNull(),
+  botUserId: text('bot_user_id'),
+  installedByUserId: uuid('installed_by_user_id').references(() => users.id),
+  removedAt: timestamp('removed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex('slack_installations_team_idx').on(t.teamId)]);
+
 export const repositories = pgTable('repositories', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id),

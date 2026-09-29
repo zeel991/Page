@@ -1,6 +1,6 @@
 import { LocalKeyWrapper } from '@pager/core';
 import { CredentialVault } from '@pager/db';
-import { GitHubAppClient } from '@pager/providers';
+import { GitHubAppClient, SlackAppClient } from '@pager/providers';
 import { buildApp } from './app.ts';
 
 /** The operator's GitHub App, when every part of it is configured. */
@@ -39,6 +39,17 @@ async function main(): Promise<void> {
     webOrigin: process.env.PAGER_WEB_ORIGIN ?? 'http://127.0.0.1:4100',
     vault: new CredentialVault(handle.db, new LocalKeyWrapper(process.env.PAGER_MASTER_KEY)),
     github: githubApp(process.env),
+    slack:
+      process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET
+        ? {
+            client: new SlackAppClient({
+              clientId: process.env.SLACK_CLIENT_ID,
+              clientSecret: process.env.SLACK_CLIENT_SECRET,
+              baseUrl: process.env.PAGER_SLACK_URL ?? 'https://slack.com',
+            }),
+            redirectUri: `${process.env.PAGER_WEB_ORIGIN ?? 'http://127.0.0.1:4100'}/onboarding/slack/callback`,
+          }
+        : null,
     ...(process.env.LOG_LEVEL ? { logLevel: process.env.LOG_LEVEL } : {}),
   });
 

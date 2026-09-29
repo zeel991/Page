@@ -10,3 +10,4 @@ export * from './identity.js';
 export * from './console-reads.js';
 export * from './vault.js';
 export * from './installations.js';
+export * from './slack.js';
