@@ -43,6 +43,21 @@ export interface InvestigationProviders {
   knowledge: KnowledgeProvider | null;
 }
 
+/**
+ * The most file or diff text one tool result carries. Every turn resends the whole
+ * conversation, so one large file read early is paid for on every turn after it.
+ * Longer content is cut here and marked, so the model knows it saw a part.
+ */
+export const MAX_TOOL_TEXT_CHARS = 40_000;
+/** The most paths one listing returns to the model. */
+export const MAX_LISTED_PATHS = 2_000;
+
+function capText(text: string): { text: string; truncated: boolean; totalChars: number } {
+  return text.length <= MAX_TOOL_TEXT_CHARS
+    ? { text, truncated: false, totalChars: text.length }
+    : { text: text.slice(0, MAX_TOOL_TEXT_CHARS), truncated: true, totalChars: text.length };
+}
+
 /** Each read may take this long before it counts as failed. Enforced by the tracer. */
 export const READ_ONLY_TOOL_TIMEOUT_MS = 30_000;
 
@@ -188,12 +203,14 @@ const TOOLS: InvestigationTool[] = [
         { repo: target.repository, ref: target.deployedRevision },
         () => providers.sourceControl.listFiles(target.repository, target.deployedRevision),
       );
+      const shown = value.paths.slice(0, MAX_LISTED_PATHS);
+      const truncated = value.truncated || shown.length < value.paths.length;
       return {
         revision: target.deployedRevision,
-        paths: value.paths,
-        truncated: value.truncated,
-        ...(value.truncated
-          ? { note: 'The provider listed only part of the tree. A path absent here may still exist; read it directly.' }
+        paths: shown,
+        truncated,
+        ...(truncated
+          ? { note: `Only part of the tree is listed (${shown.length} path(s) shown). A path absent here may still exist; read it directly.` }
           : {}),
       };
     },
@@ -223,9 +240,16 @@ const TOOLS: InvestigationTool[] = [
             String(args.path),
           ),
       );
-      return value === null
-        ? { path: args.path, revision: target.deployedRevision, content: null, note: 'No such file at this revision.' }
-        : { path: args.path, revision: target.deployedRevision, content: value };
+      if (value === null) return { path: args.path, revision: target.deployedRevision, content: null, note: 'No such file at this revision.' };
+      const capped = capText(value);
+      return {
+        path: args.path,
+        revision: target.deployedRevision,
+        content: capped.text,
+        ...(capped.truncated
+          ? { truncated: true, note: `Only the first ${MAX_TOOL_TEXT_CHARS} of ${capped.totalChars} characters are shown.` }
+          : {}),
+      };
     },
   },
   {
@@ -262,7 +286,10 @@ const TOOLS: InvestigationTool[] = [
         baseSha: value.baseSha,
         headSha: value.headSha,
         files: value.files,
-        patch: value.patch,
+        patch: value.patch === null ? null : capText(value.patch).text,
+        ...(value.patch && value.patch.length > MAX_TOOL_TEXT_CHARS
+          ? { patchTruncated: true, patchNote: `Only the first ${MAX_TOOL_TEXT_CHARS} of ${value.patch.length} characters of the patch are shown.` }
+          : {}),
         truncated: value.truncated,
         note: value.truncated
           ? 'This diff is TRUNCATED: the provider returned only part of it. A file absent here may still have changed.'

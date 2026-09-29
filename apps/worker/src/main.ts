@@ -15,9 +15,10 @@
  */
 import { createServer } from 'node:http';
 import { LocalKeyWrapper, redactSecrets, registerSecret } from '@pager/core';
-import { CredentialVault, JobQueue, createDatabase, isPgliteUrl, migrate } from '@pager/db';
+import { CredentialVault, JobQueue, UsageRepository, createDatabase, isPgliteUrl, migrate } from '@pager/db';
 import { githubAppFromEnv } from '@pager/providers';
-import { AnthropicModel, IncidentInvestigator, ModelPatchGenerator } from '@pager/agents';
+import { AnthropicModel, IncidentInvestigator, MeteredModel, ModelPatchGenerator } from '@pager/agents';
+import { usageMeter } from './meter.ts';
 import { DockerRunner, LocalProcessRunner } from '@pager/sandbox';
 import { describeConfig, loadConfig } from './config.ts';
 import type { JobContext } from './jobs.ts';
@@ -45,6 +46,9 @@ async function main(): Promise<void> {
   if (isPgliteUrl(config.databaseUrl)) await migrate(handle);
 
   const vault = new CredentialVault(handle.db, new LocalKeyWrapper(config.masterKey));
+  const usage = new UsageRepository(handle.db);
+  // A workspace's own cap when it set one. Plan defaults arrive with plans.
+  const budgetFor = async (organizationId: string, _operatorKey: boolean) => usage.budget(organizationId);
   const queue = new JobQueue(handle.db, { workerId: config.workerId, maxRunning: config.maxRunningJobs });
   const ctx: JobContext = {
     op: {
@@ -61,16 +65,28 @@ async function main(): Promise<void> {
     // A workspace's own key when it brought one; otherwise the operator's, if any.
     // With neither, the workflow still detects, files and reports, and stops short of
     // a patch, saying why.
-    agentsFor: (tenant) => {
+    agentsFor: (tenant, scope) => {
       const apiKey = tenant.anthropicKey ?? config.operatorAnthropicKey;
       if (!apiKey) return {};
       registerSecret(apiKey);
-      const model = new AnthropicModel({ apiKey, model: config.model });
+      const base = new AnthropicModel({ apiKey, model: config.model });
+      // Every call is checked against the workspace's monthly cap first, and its
+      // usage and cost recorded after.
+      const meter = usageMeter(
+        handle.db,
+        {
+          organizationId: tenant.service.organizationId,
+          serviceId: tenant.service.id,
+          keySource: tenant.anthropicKey ? 'workspace' : 'operator',
+          incidentId: scope.incidentId,
+        },
+        () => budgetFor(tenant.service.organizationId, !tenant.anthropicKey),
+      );
       return {
         model: config.model,
-        patchGenerator: new ModelPatchGenerator({ model, tracer: tenant.tracer }),
+        patchGenerator: new ModelPatchGenerator({ model: new MeteredModel(base, meter, 'patch'), tracer: tenant.tracer }),
         investigator: new IncidentInvestigator({
-          model,
+          model: new MeteredModel(base, meter, 'investigation'),
           tracer: tenant.tracer,
           autonomy: tenant.autonomy,
           providers: { observability: tenant.observability, sourceControl: tenant.sourceControl, knowledge: tenant.knowledge },

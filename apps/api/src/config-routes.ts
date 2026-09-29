@@ -6,6 +6,7 @@ import {
   IntegrationRepository,
   ServiceConfigRepository,
   SlackRepository,
+  UsageRepository,
   type CredentialVault,
   type Database,
   type IntegrationProvider,
@@ -194,6 +195,24 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
     }
     await integrations.recordTest(o, provider as IntegrationProvider, result.ok ? { ok: true } : { ok: false, error: result.error });
     return { provider, result };
+  });
+
+  // ── Model usage and the monthly budget ──────────────────────────────────────
+  const usage = new UsageRepository(deps.db);
+  app.get('/api/usage', async (request) => {
+    const o = org(request);
+    const [monthToDate, byKind, budget] = await Promise.all([usage.monthToDate(o), usage.byKind(o), usage.budget(o)]);
+    return { monthToDate, byKind, monthlyBudgetUsd: budget };
+  });
+
+  app.put('/api/budget', async (request, reply) => {
+    if (!requireRole(request, reply, ['owner'])) return reply;
+    const value = (request.body as { monthlyBudgetUsd?: unknown })?.monthlyBudgetUsd;
+    if (value !== null && (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1_000_000)) {
+      return reply.code(400).send({ error: 'monthlyBudgetUsd must be a non-negative number of dollars, or null' });
+    }
+    await usage.setBudget(org(request), value as number | null);
+    return { monthlyBudgetUsd: value };
   });
 
   // ── Services ─────────────────────────────────────────────────────────────────

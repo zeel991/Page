@@ -50,6 +50,13 @@
       "when": 1790707888173,
       "tag": "0006_worker_queue",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790709046476,
+      "tag": "0007_usage_events",
+      "breakpoints": true
     }
   ]
 }

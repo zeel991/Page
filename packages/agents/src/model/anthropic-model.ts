@@ -18,8 +18,12 @@ import Anthropic from '@anthropic-ai/sdk';
  */
 
 export interface ModelUsage {
+  /** Uncached input tokens. */
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Input served from the prompt cache, and written to it. Priced differently from input. */
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
 }
 
 export interface ModelToolSpec {
@@ -91,6 +95,8 @@ export interface AnthropicModelOptions {
   maxRetries?: number;
   /** Reasoning depth. `high` is the API default; lowered for cheap eval passes. */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** Injected in tests, to see the request that would be sent. */
+  fetch?: typeof globalThis.fetch;
 }
 
 export class AnthropicModel implements ModelClient {
@@ -106,17 +112,23 @@ export class AnthropicModel implements ModelClient {
       apiKey: opts.apiKey,
       timeout: opts.timeoutMs ?? 180_000,
       maxRetries: opts.maxRetries ?? 2,
+      ...(opts.fetch ? { fetch: opts.fetch } : {}),
     });
   }
 
   async complete(request: ModelRequest): Promise<ModelTurn> {
     const started = Date.now();
 
+    // Prompt caching. The system prompt (and the tool definitions before it) is the
+    // same on every turn, so it carries a breakpoint; the top-level marker caches
+    // the conversation so far, because every investigation turn resends the whole
+    // history. Without either, each turn paid full price for everything again.
     const response = await this.client.messages.create({
       model: this.model,
       max_tokens: request.maxTokens ?? this.maxTokens,
       output_config: { effort: this.effort },
-      system: request.system,
+      system: [{ type: 'text', text: request.system, cache_control: { type: 'ephemeral' } }],
+      cache_control: { type: 'ephemeral' },
       tools: request.tools.map((t) => ({
         name: t.name,
         description: t.description,
@@ -149,6 +161,8 @@ export class AnthropicModel implements ModelClient {
       usage: {
         inputTokens: response.usage?.input_tokens ?? null,
         outputTokens: response.usage?.output_tokens ?? null,
+        cacheReadTokens: response.usage?.cache_read_input_tokens ?? null,
+        cacheWriteTokens: response.usage?.cache_creation_input_tokens ?? null,
       },
       model: response.model ?? this.model,
       durationMs: Date.now() - started,

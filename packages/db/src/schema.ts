@@ -53,6 +53,8 @@ export const organizations = pgTable('organizations', {
   slug: text('slug').notNull().unique(),
   /** Autonomy ceiling for this org. Raising it is an explicit operator act. */
   autonomyLevel: text('autonomy_level').notNull().default('L3'),
+  /** Monthly model spend cap in USD. Null: the plan's default applies (item 8). */
+  monthlyBudgetUsd: doublePrecision('monthly_budget_usd'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -615,3 +617,26 @@ export const revisionRuns = pgTable('revision_runs', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex('revision_runs_service_revision_idx').on(t.serviceId, t.deployedRevision)]);
+
+/**
+ * One model call's usage and cost. Tokens come from the provider's response; cost is
+ * derived from the published price table, and is null (unknown) for a model it does
+ * not list — never zero.
+ */
+export const usageEvents = pgTable('usage_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  serviceId: uuid('service_id').references(() => services.id, { onDelete: 'set null' }),
+  incidentId: uuid('incident_id').references(() => incidents.id, { onDelete: 'set null' }),
+  /** 'investigation' | 'patch' */
+  kind: text('kind').notNull(),
+  model: text('model').notNull(),
+  /** Whose key paid: the workspace's own, or the operator's. */
+  keySource: text('key_source').notNull(),
+  inputTokens: integer('input_tokens'),
+  outputTokens: integer('output_tokens'),
+  cacheReadTokens: integer('cache_read_tokens'),
+  cacheWriteTokens: integer('cache_write_tokens'),
+  usdCost: doublePrecision('usd_cost'),
+  at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index('usage_events_org_time_idx').on(t.organizationId, t.at)]);

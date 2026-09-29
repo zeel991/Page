@@ -15,3 +15,5 @@ export * from './investigator/tools.js';
 export * from './investigator/investigator.js';
 export * from './model-patch-generator.js';
 export * from './workflow.js';
+export * from './model/pricing.js';
+export * from './model/metered-model.js';

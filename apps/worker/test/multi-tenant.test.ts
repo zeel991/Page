@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JobQueue, RevisionRunRepository, incidents, jobs, revisionRuns, incidentEvents } from '@pager/db';
-import { ScriptedPatchGenerator, type WorkflowCheckpoint } from '@pager/agents';
+import { MeteredModel, ModelPatchGenerator, ScriptedPatchGenerator, type ModelClient, type WorkflowCheckpoint } from '@pager/agents';
+import { UsageRepository } from '@pager/db';
+import { usageMeter } from '../src/meter.ts';
 import { LocalProcessRunner } from '@pager/sandbox';
 import { harness, healthServer, onboard, type Harness } from '../../api/test/harness.ts';
 import { Worker } from '../src/worker.ts';
@@ -224,5 +226,41 @@ describe('multi-tenant worker', () => {
     // Bob's workspace has nothing configured, so nothing ran for it and he sees nothing.
     expect(((await h.call('GET', '/api/incidents', other.token)).json() as { incidents: unknown[] }).incidents).toEqual([]);
     expect(((await h.call('GET', '/api/incidents', session.token)).json() as { incidents: unknown[] }).incidents).toHaveLength(1);
+  });
+
+  // A workspace past its monthly model budget used to keep spending: nothing checked.
+  it('stops an incident at the monthly budget, and says so, without calling the model', async () => {
+    const { session } = await onboard(h, { healthUrl: health.url });
+    const usage = new UsageRepository(h.handle.db);
+    await usage.setBudget(session.org, 5);
+    await usage.record({ organizationId: session.org, kind: 'investigation', model: 'claude-opus-5-5', keySource: 'workspace', usdCost: 6, at: clock });
+
+    let calls = 0;
+    const model: ModelClient = { model: 'claude-opus-5-5', complete: async () => { calls++; throw new Error('should not be called'); } };
+    const { worker: w } = worker('w1', {
+      agentsFor: (tenant, scope) => {
+        const meter = usageMeter(
+          h.handle.db,
+          { organizationId: tenant.service.organizationId, serviceId: tenant.service.id, keySource: 'workspace', incidentId: scope.incidentId },
+          () => usage.budget(tenant.service.organizationId),
+          now,
+        );
+        return { patchGenerator: new ModelPatchGenerator({ model: new MeteredModel(model, meter, 'patch'), tracer: tenant.tracer }) };
+      },
+    });
+    await w.schedulePolls();
+    await w.drain();
+
+    expect(calls).toBe(0);
+    const [run] = await h.handle.db.select().from(revisionRuns);
+    expect(run).toMatchObject({ phase: 'budget_reached' });
+    expect(run!.outcome).toMatch(/\$6\.00 spent of \$5\.00/);
+    const blocked = (await h.handle.db.select().from(jobs)).find((j) => j.kind === 'run_incident')!;
+    expect(blocked.status).toBe('budget_blocked');
+    const timeline = await h.handle.db.select().from(incidentEvents);
+    expect(timeline.map((e) => e.kind)).toContain('budget_reached');
+    // The console reports the spend it is judging against.
+    const report = (await h.call('GET', '/api/usage', session.token)).json() as { monthToDate: { usd: number }; monthlyBudgetUsd: number };
+    expect(report).toMatchObject({ monthToDate: { usd: 6 }, monthlyBudgetUsd: 5 });
   });
 });

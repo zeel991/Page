@@ -1,5 +1,6 @@
 import { JobQueue, RevisionRunRepository, ServiceConfigRepository, type JobRow, type RevisionRunRow } from '@pager/db';
 import {
+  BudgetExceededError,
   IncidentWorkflow,
   ProductionWatcher,
   mergeButtonBlocks,
@@ -31,8 +32,14 @@ export interface JobContext {
   op: OperatorServices;
   queue: JobQueue;
   sandboxRunner: SandboxRunner;
-  /** The reasoning steps for a tenant: model-backed in production, scripted in tests. */
-  agentsFor: (tenant: Tenant) => { patchGenerator?: PatchGenerator; investigator?: IncidentInvestigator | null; model?: string };
+  /**
+   * The reasoning steps for a tenant: model-backed in production, scripted in tests.
+   * `incidentId` reads the incident the run is on, for usage records.
+   */
+  agentsFor: (
+    tenant: Tenant,
+    scope: { incidentId: () => string | null },
+  ) => { patchGenerator?: PatchGenerator; investigator?: IncidentInvestigator | null; model?: string };
   /** Whether a merge button may be offered (the Slack app has a signing secret). */
   mergeButton: boolean;
   log: (line: string) => void;
@@ -51,8 +58,8 @@ function incidentKeyFor(revision: string): string {
   return `INC-${revision.slice(0, 12).toUpperCase()}`;
 }
 
-function workflowFor(c: JobContext, tenant: Tenant): IncidentWorkflow {
-  const agents = c.agentsFor(tenant);
+function workflowFor(c: JobContext, tenant: Tenant, incidentId: () => string | null = () => null): IncidentWorkflow {
+  const agents = c.agentsFor(tenant, { incidentId });
   return new IncidentWorkflow({
     observability: tenant.observability,
     sourceControl: tenant.sourceControl,
@@ -187,27 +194,40 @@ async function runIncident(c: JobContext, job: JobRow): Promise<JobOutcome> {
   };
 
   const incidentKey = run.incidentKey ?? incidentKeyFor(run.deployedRevision);
-  const result = await workflowFor(c, tenant).run({
-    service: tenant.service.name,
-    repository: tenant.repository.fullName,
-    baseBranch: tenant.service.baseBranch ?? tenant.repository.defaultBranch,
-    slackChannel: tenant.service.slackChannelId!,
-    deployment,
-    incidentKey,
-    ...(tenant.emailRecipients.length ? { teamEmails: tenant.emailRecipients } : {}),
-    resume,
-    onCheckpoint: async (cp) => {
-      await runs.update(run.id, {
-        incidentKey,
-        ...(cp.incidentId ? { incidentId: cp.incidentId } : {}),
-        ...(cp.issue ? { issueKey: cp.issue.key, issueUrl: cp.issue.url } : {}),
-        ...(cp.slackThread ? { slackThreadTs: cp.slackThread.id, slackChannel: cp.slackThread.channel } : {}),
-        ...(cp.branch ? { branch: cp.branch } : {}),
-        ...(cp.pullRequest ? { pullRequestNumber: cp.pullRequest.number, pullRequestUrl: cp.pullRequest.url, headSha: cp.pullRequest.headSha } : {}),
-      });
-      await c.onCheckpoint?.(cp);
-    },
-  });
+  let currentIncident: string | null = run.incidentId;
+  let result: Awaited<ReturnType<IncidentWorkflow['run']>>;
+  try {
+    result = await workflowFor(c, tenant, () => currentIncident).run({
+      service: tenant.service.name,
+      repository: tenant.repository.fullName,
+      baseBranch: tenant.service.baseBranch ?? tenant.repository.defaultBranch,
+      slackChannel: tenant.service.slackChannelId!,
+      deployment,
+      incidentKey,
+      ...(tenant.emailRecipients.length ? { teamEmails: tenant.emailRecipients } : {}),
+      resume,
+      onCheckpoint: async (cp) => {
+        if (cp.incidentId) currentIncident = cp.incidentId;
+        await runs.update(run.id, {
+          incidentKey,
+          ...(cp.incidentId ? { incidentId: cp.incidentId } : {}),
+          ...(cp.issue ? { issueKey: cp.issue.key, issueUrl: cp.issue.url } : {}),
+          ...(cp.slackThread ? { slackThreadTs: cp.slackThread.id, slackChannel: cp.slackThread.channel } : {}),
+          ...(cp.branch ? { branch: cp.branch } : {}),
+          ...(cp.pullRequest ? { pullRequestNumber: cp.pullRequest.number, pullRequestUrl: cp.pullRequest.url, headSha: cp.pullRequest.headSha } : {}),
+        });
+        await c.onCheckpoint?.(cp);
+      },
+    });
+  } catch (err) {
+    if (!(err instanceof BudgetExceededError)) throw err;
+    // Stopped, not failed: retrying would only be refused again. The incident stays
+    // open and says why, and the run can be resumed once the budget allows.
+    const reason = `${err.message} The incident was not worked further; raise the budget or wait for next month.`;
+    await runs.update(run.id, { phase: 'budget_reached', outcome: reason });
+    if (currentIncident) await tenant.persistence.engine.note(currentIncident, { kind: 'budget_reached', summary: reason }).catch(() => undefined);
+    return { kind: 'blocked', reason };
+  }
 
   if (!result.alert?.escalate) {
     await runs.update(run.id, { phase: 'not_escalated', outcome: result.alert?.rationale ?? 'no monitor alerting any more' });
@@ -313,7 +333,7 @@ async function verifyRecovery(c: JobContext, job: JobRow): Promise<JobOutcome> {
     return { kind: 'reschedule', at: new Date(now(c).getTime() + MERGE_POLL_MS), result: { waiting: decision.reason } };
   }
 
-  const after = await workflowFor(c, tenant).completeAfterMerge({
+  const after = await workflowFor(c, tenant, () => run.incidentId).completeAfterMerge({
     service: tenant.service.name,
     repository: tenant.repository.fullName,
     slackChannel: tenant.service.slackChannelId!,
