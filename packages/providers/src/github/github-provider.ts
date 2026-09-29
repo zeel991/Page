@@ -9,6 +9,7 @@ import type {
   CommitFilesInput,
   CreatePullRequestInput,
   Diff,
+  FileListing,
   PullRequest,
   SourceControlProvider,
 } from '../types.js';
@@ -53,6 +54,7 @@ interface GhCompareResponse {
   status?: string;
   ahead_by?: number;
   behind_by?: number;
+  total_commits?: number;
   files?: GhFile[];
   commits?: GhCommitResponse[];
 }
@@ -66,6 +68,22 @@ interface GhTreeEntry {
 
 interface GhTreeResponse {
   tree?: GhTreeEntry[];
+  /** GitHub stops a recursive listing at 100,000 entries or 7 MB and says so here. */
+  truncated?: boolean;
+}
+
+/** GitHub's compare returns at most this many files, with no way to page further. */
+export const COMPARE_FILE_LIMIT = 300;
+const PAGE_SIZE = 100;
+/** A bound on paging, so a pathological history cannot turn one read into thousands. */
+const MAX_PAGES = 50;
+
+/** A listing the provider would not return in full, even by paging. */
+export class TruncatedListingError extends Error {
+  constructor(what: string) {
+    super(`${what} is longer than this adapter will page through; refusing to return part of it as the whole.`);
+    this.name = 'TruncatedListingError';
+  }
 }
 
 interface GhPullRequest {
@@ -214,8 +232,8 @@ export class GitHubProvider implements SourceControlProvider {
 
     if (files.length === 0) {
       const fromTrees = await this.diffTrees(repo, baseSha, headSha);
-      if (fromTrees.length > 0) {
-        return { baseSha, headSha, files: fromTrees, patch: null };
+      if (fromTrees.files.length > 0) {
+        return { baseSha, headSha, files: fromTrees.files, patch: null, truncated: fromTrees.truncated };
       }
     }
 
@@ -232,14 +250,31 @@ export class GitHubProvider implements SourceControlProvider {
             .map((f) => `--- ${f.filename}\n${f.patch}`)
             .join('\n')
         : null,
+      // Compare cannot be paged for files: at the cap, some changed files are missing.
+      truncated: files.length >= COMPARE_FILE_LIMIT,
     };
   }
 
+  /**
+   * Commits in the deployment, paged in full.
+   *
+   * Compare returns 250 commits unpaged; asking for pages returns them all. Stopping
+   * at the first page would silently drop the oldest commits of a large deployment.
+   */
   async listCommitsBetween(repo: string, baseSha: string, headSha: string): Promise<Commit[]> {
-    const res = await this.http.get<GhCompareResponse>(
-      `/repos/${repoPath(repo)}/compare/${segment(baseSha)}...${segment(headSha)}`,
-    );
-    return (res.commits ?? []).map(toCommit);
+    const out: Commit[] = [];
+    let total: number | null = null;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const res = await this.http.get<GhCompareResponse>(
+        `/repos/${repoPath(repo)}/compare/${segment(baseSha)}...${segment(headSha)}`,
+        { per_page: PAGE_SIZE, page },
+      );
+      const commits = res.commits ?? [];
+      total = res.total_commits ?? total;
+      out.push(...commits.map(toCommit));
+      if (commits.length < PAGE_SIZE || (total !== null && out.length >= total)) return out;
+    }
+    throw new TruncatedListingError(`The commit list for ${baseSha.slice(0, 12)}...${headSha.slice(0, 12)}`);
   }
 
   async compareCommits(repo: string, baseSha: string, headSha: string): Promise<CommitComparison> {
@@ -257,7 +292,7 @@ export class GitHubProvider implements SourceControlProvider {
   }
 
   /** Recursive tree for a revision, as a path -> blob sha map. */
-  private async treeMap(repo: string, sha: string): Promise<Map<string, string>> {
+  private async treeMap(repo: string, sha: string): Promise<{ map: Map<string, string>; truncated: boolean }> {
     const res = await this.http.getOptional<GhTreeResponse>(
       `/repos/${repoPath(repo)}/git/trees/${segment(sha)}`,
       { recursive: 1 },
@@ -266,32 +301,36 @@ export class GitHubProvider implements SourceControlProvider {
     for (const entry of res?.tree ?? []) {
       if (entry.type === 'blob') map.set(entry.path, entry.sha);
     }
-    return map;
+    return { map, truncated: res?.truncated === true };
   }
 
   /** Changed files derived by comparing two revisions' trees. */
-  private async diffTrees(repo: string, baseSha: string, headSha: string): Promise<ChangedFile[]> {
-    const [base, head] = await Promise.all([
+  private async diffTrees(repo: string, baseSha: string, headSha: string): Promise<{ files: ChangedFile[]; truncated: boolean }> {
+    const [baseTree, headTree] = await Promise.all([
       this.treeMap(repo, baseSha),
       this.treeMap(repo, headSha),
     ]);
-    if (base.size === 0 && head.size === 0) return [];
+    const base = baseTree.map;
+    const head = headTree.map;
+    const truncated = baseTree.truncated || headTree.truncated;
+    if (base.size === 0 && head.size === 0) return { files: [], truncated };
 
     const changed: ChangedFile[] = [];
     for (const [path, sha] of head) {
       const before = base.get(path);
       if (before === undefined) {
-        changed.push({ path, status: 'added', additions: 0, deletions: 0 });
+        // With a truncated base listing, "absent" may only mean "not listed".
+        if (!baseTree.truncated) changed.push({ path, status: 'added', additions: 0, deletions: 0 });
       } else if (before !== sha) {
         changed.push({ path, status: 'modified', additions: 0, deletions: 0 });
       }
     }
     for (const path of base.keys()) {
-      if (!head.has(path)) {
+      if (!head.has(path) && !headTree.truncated) {
         changed.push({ path, status: 'removed', additions: 0, deletions: 0 });
       }
     }
-    return changed.sort((a, b) => a.path.localeCompare(b.path));
+    return { files: changed.sort((a, b) => a.path.localeCompare(b.path)), truncated };
   }
 
   async listCommits(repo: string, opts: { ref?: string; limit?: number } = {}): Promise<Commit[]> {
@@ -321,31 +360,58 @@ export class GitHubProvider implements SourceControlProvider {
     );
     if (direct && direct.length > 0) return direct.map(toPullRequest);
 
-    const all = await this.http.getOptional<GhPullRequest[]>(`/repos/${repoPath(repo)}/pulls`, {
-      state: 'all',
-      per_page: 100,
-    });
-    return (all ?? [])
-      .filter((pr) => pr.merge_commit_sha === sha || pr.head?.sha === sha)
-      .map(toPullRequest);
+    // Paged in full: stopping at the first hundred would miss the pull request of
+    // any repository with more history than that, and report "none".
+    const matches: PullRequest[] = [];
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const batch = await this.http.getOptional<GhPullRequest[]>(`/repos/${repoPath(repo)}/pulls`, {
+        state: 'all',
+        per_page: PAGE_SIZE,
+        page,
+      });
+      for (const pr of batch ?? []) {
+        if (pr.merge_commit_sha === sha || pr.head?.sha === sha) matches.push(toPullRequest(pr));
+      }
+      if (!batch || batch.length < PAGE_SIZE) return matches;
+    }
+    if (matches.length > 0) return matches;
+    throw new TruncatedListingError(`The pull request list for ${repo}`);
   }
 
+  /**
+   * One file at a revision, or null when it does not exist there.
+   *
+   * The contents API inlines files up to 1 MB. Above that it answers with
+   * `encoding: "none"` and no content — which used to come back as null, the same
+   * as "missing". Such files are read through the blob API instead, and an empty
+   * file is returned as the empty string it is.
+   */
   async getFile(repo: string, ref: string, path: string): Promise<string | null> {
-    const res = await this.http.getOptional<{ content?: string; encoding?: string }>(
+    const res = await this.http.getOptional<{ content?: string; encoding?: string; sha?: string; size?: number; type?: string }>(
       `/repos/${repoPath(repo)}/contents/${refPath(path)}`,
       { ref },
     );
-    if (!res?.content) return null;
-    return res.encoding === 'base64'
-      ? Buffer.from(res.content, 'base64').toString('utf8')
-      : res.content;
+    if (!res) return null;
+    if (res.type !== undefined && res.type !== 'file') return null;
+    if (res.encoding === 'none' || (!res.content && (res.size ?? 0) > 0)) {
+      if (!res.sha) throw new Error(`GitHub listed ${path} (${res.size ?? '?'} bytes) without a blob sha to read it by.`);
+      const blob = await this.http.get<{ content?: string; encoding?: string }>(
+        `/repos/${repoPath(repo)}/git/blobs/${segment(res.sha)}`,
+      );
+      return decode(blob.content ?? '', blob.encoding);
+    }
+    return decode(res.content ?? '', res.encoding);
   }
 
-  async listFiles(repo: string, ref: string): Promise<string[]> {
+  /** Every path at a revision. `truncated` says when GitHub listed only part of the tree. */
+  async listFiles(repo: string, ref: string): Promise<FileListing> {
     const res = await this.http.getOptional<GhTreeResponse>(`/repos/${repoPath(repo)}/git/trees/${segment(ref)}`, {
       recursive: 1,
     });
-    return (res?.tree ?? []).filter((e) => e.type === 'blob').map((e) => e.path).sort();
+    return {
+      paths: (res?.tree ?? []).filter((e) => e.type === 'blob').map((e) => e.path).sort(),
+      truncated: res?.truncated === true,
+    };
   }
 
   async createBranch(repo: string, fromSha: string, name: string): Promise<Branch> {
@@ -505,6 +571,10 @@ function toCommit(res: GhCommitResponse): Commit {
     committedAt: new Date(author.date),
     parents: (res.parents ?? []).map((p) => p.sha),
   };
+}
+
+function decode(content: string, encoding: string | undefined): string {
+  return encoding === 'base64' ? Buffer.from(content, 'base64').toString('utf8') : content;
 }
 
 function toChangedFile(f: GhFile): ChangedFile {

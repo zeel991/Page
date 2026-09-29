@@ -340,6 +340,30 @@ describe('GitHubProvider diff fallbacks', () => {
  * repository, which outlives any process, so "has this already been worked" becomes
  * a question with a durable answer.
  */
+describe('GitHubProvider pull request lookup', () => {
+  // The fallback read one page of 100, so a repository with more history reported
+  // "no pull request" for a commit whose pull request was simply further back.
+  it('pages through every pull request when the direct route is empty', async () => {
+    const pr = (n: number) => ({
+      number: n, title: `#${n}`, body: '', head: { ref: `b${n}`, sha: `h${n}` }, base: { ref: 'main' },
+      html_url: `https://github.test/pull/${n}`, state: 'closed', merged: true, merge_commit_sha: n === 140 ? 'target' : `m${n}`,
+    });
+    const { fetchImpl, seen } = stubFetch([
+      (u) => (u.includes('/commits/target/pulls') ? { body: [] } : undefined),
+      (u) => {
+        if (!u.includes('/pulls?')) return undefined;
+        const page = Number(new URL(u).searchParams.get('page'));
+        const all = Array.from({ length: 150 }, (_, i) => pr(i + 1));
+        return { body: all.slice((page - 1) * 100, page * 100) };
+      },
+    ]);
+    const gh = new GitHubProvider({ baseUrl: 'https://api.github.test', token: 't', fetchImpl });
+    const found = await gh.listPullRequestsForCommit('acme/checkout-api', 'target');
+    expect(found.map((p) => p.number)).toEqual([140]);
+    expect(seen.filter((s) => s.includes('/pulls?'))).toHaveLength(2);
+  });
+});
+
 describe('GitHubProvider.getBranch', () => {
   it('returns the branch when the ref exists', async () => {
     const { fetchImpl, seen } = stubFetch([

@@ -281,8 +281,13 @@ export function githubRoutes(): Route[] {
         const head = findCommit(repo, headRef ?? '');
         if (!base || !head) return { status: 404, body: { message: 'Not Found' } };
 
-        const files = diffCommits(base, head);
+        // Real GitHub: at most 300 files, never paged; commits paged when asked,
+        // otherwise the first 250.
+        const files = diffCommits(base, head).slice(0, 300);
         const between = commitsBetween(repo, base, head);
+        const perPage = ctx.query.per_page ? Math.min(Number(ctx.query.per_page), 100) : 250;
+        const page = Math.max(1, Number(ctx.query.page ?? 1));
+        const pageOfCommits = between.slice((page - 1) * perPage, page * perPage);
         const behind = commitsBetween(repo, head, base);
         // The relation GitHub reports, derived from the graph rather than asserted.
         const relation =
@@ -300,7 +305,7 @@ export function githubRoutes(): Route[] {
             ahead_by: between.length,
             behind_by: behind.length,
             total_commits: between.length,
-            commits: between.map((c) => commitJson(repo, c)),
+            commits: pageOfCommits.map((c) => commitJson(repo, c)),
             files: files.map(fileJson),
             base_commit: commitJson(repo, base),
             changed_files: files.length,
@@ -321,12 +326,14 @@ export function githubRoutes(): Route[] {
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const commit = findCommit(repo, ctx.params[2]!);
         if (!commit) return { status: 404, body: { message: 'Not Found' } };
+        const limit = ctx.state.limits?.treeEntries ?? 100_000;
+        const entries = [...commit.files];
         return {
           status: 200,
           body: {
             sha: commit.sha,
-            truncated: false,
-            tree: [...commit.files].map(([path, content]) => ({
+            truncated: entries.length > limit,
+            tree: entries.slice(0, limit).map(([path, content]) => ({
               path,
               mode: '100644',
               type: 'blob',
@@ -350,12 +357,18 @@ export function githubRoutes(): Route[] {
         const path = ctx.params[2]!;
         const content = commit.files.get(path);
         if (content === undefined) return { status: 404, body: { message: `Not Found: ${path}` } };
+        const size = Buffer.byteLength(content, 'utf8');
+        // Over 1 MB GitHub still answers, but with no content: it must be read as a blob.
+        if (size > (ctx.state.limits?.inlineFileBytes ?? 1_000_000)) {
+          return { status: 200, body: { type: 'file', path, sha: blobSha(content), size, encoding: 'none', content: '' } };
+        }
         return {
           status: 200,
           body: {
+            type: 'file',
             path,
             sha: blobSha(content),
-            size: content.length,
+            size,
             encoding: 'base64',
             content: Buffer.from(content, 'utf8').toString('base64'),
           },
@@ -370,10 +383,13 @@ export function githubRoutes(): Route[] {
         const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const state = ctx.query.state ?? 'open';
+        const perPage = Math.min(Number(ctx.query.per_page ?? 30), 100);
+        const page = Math.max(1, Number(ctx.query.page ?? 1));
         return {
           status: 200,
           body: repo.pullRequests
             .filter((p) => state === 'all' || p.state === state)
+            .slice((page - 1) * perPage, page * perPage)
             .map((p) => prJson(repo, p)),
         };
       },
@@ -505,6 +521,31 @@ export function githubRoutes(): Route[] {
             tree: { sha: commit.sha },
             parents: commit.parents.map((p) => ({ sha: p })),
           },
+        };
+      },
+    },
+    {
+      method: 'GET',
+      pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/blobs\/([^/]+)$/,
+      handler: (ctx) => {
+        if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        if (!repo) return { status: 404, body: { message: 'Not Found' } };
+        const sha = ctx.params[2]!;
+        let content = ctx.state.blobs.get(sha);
+        for (const c of repo.commits) {
+          if (content !== undefined) break;
+          for (const file of c.files.values()) {
+            if (blobSha(file) === sha) {
+              content = file;
+              break;
+            }
+          }
+        }
+        if (content === undefined) return { status: 404, body: { message: 'Not Found' } };
+        return {
+          status: 200,
+          body: { sha, size: Buffer.byteLength(content), encoding: 'base64', content: Buffer.from(content).toString('base64') },
         };
       },
     },

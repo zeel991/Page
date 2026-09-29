@@ -29,6 +29,16 @@ const NOTION_VERSION = '2022-06-28';
 /** Notion's block content cap. Longer text must be split across blocks. */
 const MAX_BLOCK_TEXT = 2000;
 
+/**
+ * Notion takes at most 100 children when creating a page, and at most 100 per
+ * append (developers.notion.com: post-page `children` maxItems 100;
+ * patch-block-children "a limit of 100 block children"). Checked 2026-09-29.
+ */
+export const MAX_CHILDREN_PER_REQUEST = 100;
+
+/** How deep nested blocks (toggles, sub-bullets) are read before saying so. */
+const MAX_BLOCK_DEPTH = 3;
+
 interface RichText {
   type?: string;
   plain_text?: string;
@@ -235,25 +245,57 @@ export class NotionProvider implements KnowledgeProvider {
     const page = await this.http.getOptional<NotionPage>(`/v1/pages/${segment(id, 'page id')}`);
     if (!page) return null;
 
-    const lines: string[] = [];
-    let cursor: string | undefined;
-    // Children are paginated; a long runbook silently truncated at 100 blocks
-    // would be worse than useless during an incident.
-    do {
-      const res = await this.http.get<{ results?: NotionBlock[]; next_cursor?: string | null; has_more?: boolean }>(
-        `/v1/blocks/${segment(id, 'block id')}/children`,
-        { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) },
-      );
-      for (const block of res.results ?? []) lines.push(renderBlock(block));
-      cursor = res.has_more && res.next_cursor ? res.next_cursor : undefined;
-    } while (cursor);
-
+    const lines = await this.readChildren(id, 0);
     return {
       id: page.id,
       title: pageTitle(page),
       url: page.url ?? `https://notion.so/${page.id.replace(/-/g, '')}`,
       content: lines.join('\n'),
     };
+  }
+
+  /**
+   * A block's children, rendered, with nested children indented beneath them.
+   *
+   * Children are paginated; a long runbook silently truncated at 100 blocks would
+   * be worse than useless during an incident. Nested blocks — a toggle's body, a
+   * sub-list — were not read at all; they are now, to a bounded depth, and what
+   * lies deeper is marked rather than dropped.
+   */
+  private async readChildren(blockId: string, depth: number): Promise<string[]> {
+    const lines: string[] = [];
+    const indent = '  '.repeat(depth);
+    let cursor: string | undefined;
+    do {
+      const res = await this.http.get<{ results?: NotionBlock[]; next_cursor?: string | null; has_more?: boolean }>(
+        `/v1/blocks/${segment(blockId, 'block id')}/children`,
+        { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) },
+      );
+      for (const block of res.results ?? []) {
+        lines.push(indent + renderBlock(block));
+        if (block.has_children) {
+          if (depth + 1 >= MAX_BLOCK_DEPTH) lines.push(`${indent}  [nested content deeper than ${MAX_BLOCK_DEPTH} levels not read]`);
+          else lines.push(...(await this.readChildren(block.id, depth + 1)));
+        }
+      }
+      cursor = res.has_more && res.next_cursor ? res.next_cursor : undefined;
+    } while (cursor);
+    return lines;
+  }
+
+  /**
+   * The name of a database's title property.
+   *
+   * A page created in a database must set the title under the database's own name
+   * for it ("Name", "Incident", …). Sending `title` is refused there.
+   */
+  private async databaseTitleProperty(databaseId: string): Promise<string> {
+    const db = await this.http.get<{ properties?: Record<string, { type?: string }> }>(
+      `/v1/databases/${segment(databaseId, 'database id')}`,
+    );
+    const found = Object.entries(db.properties ?? {}).find(([, p]) => p?.type === 'title');
+    if (!found) throw new Error(`Notion database ${databaseId} has no title property.`);
+    return found[0];
   }
 
   async createDocument(input: { title: string; content: string; parentId?: string }): Promise<KnowledgeDocument> {
@@ -266,13 +308,31 @@ export class NotionProvider implements KnowledgeProvider {
     }
     const isDatabase = Boolean(input.parentId ? false : this.opts.parentDatabaseId && !this.opts.parentPageId);
 
+    const titleProperty = isDatabase ? await this.databaseTitleProperty(parentId) : 'title';
+    const blocks = toBlocks(input.content);
     const res = await this.http.post<NotionPage>('/v1/pages', {
       parent: isDatabase ? { database_id: parentId } : { page_id: parentId },
       properties: {
-        title: { title: [{ type: 'text', text: { content: input.title } }] },
+        [titleProperty]: { title: [{ type: 'text', text: { content: input.title } }] },
       },
-      children: toBlocks(input.content),
+      children: blocks.slice(0, MAX_CHILDREN_PER_REQUEST),
     });
+
+    // The rest is appended in batches. A failure part-way leaves a page that exists
+    // but is incomplete, and that is said rather than returned as the document.
+    for (let at = MAX_CHILDREN_PER_REQUEST; at < blocks.length; at += MAX_CHILDREN_PER_REQUEST) {
+      try {
+        await this.http.patch(`/v1/blocks/${segment(res.id, 'block id')}/children`, {
+          children: blocks.slice(at, at + MAX_CHILDREN_PER_REQUEST),
+        });
+      } catch (err) {
+        throw new Error(
+          `Notion page ${res.url ?? res.id} was created but only its first ${at} of ${blocks.length} blocks ` +
+            `were written: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
+    }
 
     return {
       id: res.id,

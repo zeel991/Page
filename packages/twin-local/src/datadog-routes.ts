@@ -27,6 +27,9 @@ function metricFromQuery(query: string): string | null {
   return null;
 }
 
+/** The twin's largest log page; Datadog's is 5000. Small, so adapters must page. */
+const TWIN_LOG_PAGE = 100;
+
 export function datadogRoutes(): Route[] {
   return [
     {
@@ -65,7 +68,8 @@ export function datadogRoutes(): Route[] {
       handler: (ctx) => {
         const body = ctx.json as {
           filter?: { query?: string; from?: string; to?: string };
-          page?: { limit?: number };
+          page?: { limit?: number; cursor?: string };
+          sort?: string;
         };
         const query = body.filter?.query ?? '';
         const service = serviceFromQuery(query);
@@ -73,14 +77,20 @@ export function datadogRoutes(): Route[] {
         const to = body.filter?.to ? Date.parse(body.filter.to) : Number.MAX_SAFE_INTEGER;
         const level = /status:([a-z]+)/.exec(query)?.[1];
 
-        const matched = ctx.state.logs
+        const all = ctx.state.logs
           .filter((l) => (!service || l.service === service) && l.at >= from && l.at <= to)
           .filter((l) => !level || l.level === level)
-          .slice(0, body.page?.limit ?? 100);
+          .sort((a, b) => (body.sort === '-timestamp' ? b.at - a.at : a.at - b.at));
+        // Paged by cursor, with a page smaller than Datadog's so paging is exercised.
+        const start = Number(body.page?.cursor ?? 0);
+        const size = Math.min(body.page?.limit ?? 10, TWIN_LOG_PAGE);
+        const matched = all.slice(start, start + size);
+        const next = start + size;
 
         return {
           status: 200,
           body: {
+            ...(next < all.length ? { meta: { page: { after: String(next) } } } : {}),
             data: matched.map((l, i) => ({
               id: `log-${i}`,
               type: 'log',

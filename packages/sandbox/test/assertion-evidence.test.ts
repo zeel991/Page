@@ -21,7 +21,7 @@ import { Sandbox } from '../src/sandbox.js';
 function provider(files: Record<string, string>): SourceControlProvider {
   return {
     kind: 'source-control',
-    async listFiles() { return Object.keys(files); },
+    async listFiles() { return { paths: Object.keys(files), truncated: false }; },
     async getFile(_r, _ref, path) { return files[path] ?? null; },
   } as unknown as SourceControlProvider;
 }

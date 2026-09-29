@@ -2,6 +2,7 @@ import type { Environment } from '@pager/core';
 import { Http } from '../http.js';
 import { LOG_FACETS, type LogFacet } from '../types.js';
 import type {
+  LogEntries,
   LogEntry,
   MetricName,
   MetricSeries,
@@ -62,6 +63,7 @@ interface DdQueryResponse {
 }
 
 interface DdLogsResponse {
+  meta?: { page?: { after?: string } };
   data?: {
     attributes?: {
       timestamp?: string;
@@ -99,6 +101,9 @@ const MONITOR_STATES: Record<string, MonitorState['status']> = {
   Alert: 'ALERT',
   'No Data': 'NO_DATA',
 };
+
+/** Datadog's largest page for a log search. */
+const MAX_LOG_PAGE = 1000;
 
 /** A query the adapter will not build, because part of it is not a plain tag value. */
 export class UnsafeQueryError extends Error {
@@ -176,7 +181,7 @@ export class DatadogProvider implements ObservabilityProvider {
     service: string,
     range: TimeRange,
     opts: { level?: LogEntry['level']; filters?: Partial<Record<LogFacet, string>>; limit?: number } = {},
-  ): Promise<LogEntry[]> {
+  ): Promise<LogEntries> {
     // The service is the configured one and the rest is structured: nothing a caller
     // passes is interpolated into the query as syntax.
     const filters = [`service:${tagValue('service', service)}`];
@@ -189,21 +194,31 @@ export class DatadogProvider implements ObservabilityProvider {
       if (value !== undefined) filters.push(`@${facet}:${tagValue(facet, value)}`);
     }
 
-    const res = await this.http.post<DdLogsResponse>('/api/v2/logs/events/search', {
-      filter: {
-        query: filters.join(' '),
-        from: range.from.toISOString(),
-        to: range.to.toISOString(),
-      },
-      page: { limit: opts.limit ?? 100 },
-      // Newest first. The limit is a budget, and it must be spent on the most
-      // recent failures: ascending order spends it on the OLDEST events in the
-      // window, so a service that has been failing for a while returns only its
-      // earliest errors and the ones it is producing right now are invisible.
-      sort: '-timestamp',
-    });
+    // Paged by cursor up to the limit. The limit is a budget; when more matched than
+    // it allows, the result says so rather than presenting a sample as the whole.
+    const want = Math.max(1, opts.limit ?? 100);
+    const data: NonNullable<DdLogsResponse['data']> = [];
+    let cursor: string | undefined;
+    do {
+      const res: DdLogsResponse = await this.http.post<DdLogsResponse>('/api/v2/logs/events/search', {
+        filter: {
+          query: filters.join(' '),
+          from: range.from.toISOString(),
+          to: range.to.toISOString(),
+        },
+        page: { limit: Math.min(want - data.length, MAX_LOG_PAGE), ...(cursor ? { cursor } : {}) },
+        // Newest first. The limit is a budget, and it must be spent on the most
+        // recent failures: ascending order spends it on the OLDEST events in the
+        // window, so a service that has been failing for a while returns only its
+        // earliest errors and the ones it is producing right now are invisible.
+        sort: '-timestamp',
+      });
+      data.push(...(res.data ?? []));
+      cursor = res.meta?.page?.after || undefined;
+      if ((res.data ?? []).length === 0) break;
+    } while (cursor && data.length < want);
 
-    const entries = (res.data ?? []).map((d) => {
+    const entries = data.map((d) => {
       const a = d.attributes ?? {};
       const nested = a.attributes ?? {};
       return {
@@ -217,7 +232,8 @@ export class DatadogProvider implements ObservabilityProvider {
     });
     // Queried newest-first to spend the limit on current failures; returned
     // oldest-first because every consumer reads a log window as a narrative.
-    return entries.sort((a, b) => a.at.getTime() - b.at.getTime());
+    const sorted = entries.sort((a, b) => a.at.getTime() - b.at.getTime());
+    return Object.assign(sorted, { truncated: cursor !== undefined });
   }
 
   /**
@@ -251,7 +267,9 @@ export class DatadogProvider implements ObservabilityProvider {
     return (res ?? []).map((m) => ({
       id: String(m.id),
       name: m.name,
-      status: MONITOR_STATES[m.overall_state ?? ''] ?? 'NO_DATA',
+      // Datadog also reports Ignored, Skipped and Unknown. Mapping those to NO_DATA
+      // made an unrecognised state read as "quiet".
+      status: MONITOR_STATES[m.overall_state ?? ''] ?? 'UNKNOWN',
       service,
       query: m.query ?? '',
       transitionedAt: m.overall_state_modified ? new Date(m.overall_state_modified) : null,

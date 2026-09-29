@@ -52,7 +52,7 @@ describe('Sandbox.writePatch', () => {
     const root = await mkdtemp(join(tmpdir(), 'pager-policy-'));
     try {
       const provider = {
-        listFiles: async () => ['src/a.ts', 'test/a.test.ts'],
+        listFiles: async () => ({ paths: ['src/a.ts', 'test/a.test.ts'], truncated: false }),
         getFile: async (_r: string, _s: string, path: string) => `// ${path}`,
       };
       const sandbox = await Sandbox.create(provider as never, 'a/b', 'sha', { rootDir: root });

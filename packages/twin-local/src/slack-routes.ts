@@ -43,9 +43,18 @@ export function slackRoutes(): Route[] {
         const messages = ctx.state.messages.filter(
           (m) => m.channel === channel && (m.ts === ts || m.threadTs === ts),
         );
+        // Paged like Slack, with a small page so callers must follow the cursor.
+        const start = Number(ctx.query.cursor ?? 0);
+        const size = Math.min(Number(ctx.query.limit ?? 1000), 2);
+        const next = start + size;
         return {
           status: 200,
-          body: { ok: true, messages: messages.map((m) => ({ ts: m.ts, text: m.text, thread_ts: m.threadTs })) },
+          body: {
+            ok: true,
+            messages: messages.slice(start, next).map((m) => ({ ts: m.ts, text: m.text, thread_ts: m.threadTs })),
+            has_more: next < messages.length,
+            ...(next < messages.length ? { response_metadata: { next_cursor: String(next) } } : {}),
+          },
         };
       },
     },

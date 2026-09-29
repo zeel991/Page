@@ -132,6 +132,69 @@ describe('local GitHub twin', () => {
     expect(merged.mergedAt).toEqual(new Date('2026-09-13T14:45:00Z'));
   });
 
+  describe('pagination and truncation', () => {
+    const repoState = () => server.current.repositories.get('acme/checkout-api')!;
+    /** Extend history with commits built directly in the twin's state. */
+    function extend(count: number, change: (i: number, files: Map<string, string>) => void) {
+      const repo = repoState();
+      let parent = repo.commits[0]!;
+      for (let i = 0; i < count; i++) {
+        const files = new Map(parent.files);
+        change(i, files);
+        const commit = { ...parent, sha: `${String(i).padStart(4, '0')}${'f'.repeat(36)}`, message: `c${i}`, parents: [parent.sha], files };
+        repo.commits.unshift(commit);
+        parent = commit;
+      }
+      repo.branches.set('main', parent.sha);
+      return parent.sha;
+    }
+
+    it('pages through every commit in a large deployment', async () => {
+      const gh = await github();
+      const base = repoState().commits[0]!.sha;
+      const head = extend(260, (i, f) => f.set('CHANGELOG.md', `v${i}`));
+      // Unpaged, compare returns 250: the oldest ten would be silently missing.
+      const commits = await gh.listCommitsBetween('acme/checkout-api', base, head);
+      expect(commits).toHaveLength(260);
+    });
+
+    it('marks a diff at GitHub’s 300-file cap as truncated', async () => {
+      const gh = await github();
+      const base = repoState().commits[0]!.sha;
+      const head = extend(1, (_i, f) => {
+        for (let n = 0; n < 305; n++) f.set(`gen/file-${n}.ts`, `export const n = ${n};`);
+      });
+      const diff = await gh.getDiff('acme/checkout-api', base, head);
+      expect(diff.files).toHaveLength(300);
+      expect(diff.truncated).toBe(true);
+      const small = await gh.getDiff('acme/checkout-api', repoState().commits[1]!.sha, repoState().commits[1]!.sha);
+      expect(small.truncated).toBe(false);
+    });
+
+    it('reports a truncated tree listing as truncated', async () => {
+      const gh = await github();
+      server.current.limits = { treeEntries: 2 };
+      const head = repoState().commits[0]!.sha;
+      const listing = await gh.listFiles('acme/checkout-api', head);
+      expect(listing).toMatchObject({ truncated: true });
+      expect(listing.paths).toHaveLength(2);
+    });
+
+    // Files over 1 MB came back as null — the same answer as "no such file".
+    it('reads a file too large to inline through the blob API', async () => {
+      const gh = await github();
+      server.current.limits = { inlineFileBytes: 10 };
+      const head = extend(1, (_i, f) => {
+        f.set('data/big.json', JSON.stringify({ rows: 'x'.repeat(50) }));
+        f.set('data/empty.txt', '');
+      });
+      expect(await gh.getFile('acme/checkout-api', head, 'data/big.json')).toBe(JSON.stringify({ rows: 'x'.repeat(50) }));
+      // An empty file is empty, not missing.
+      expect(await gh.getFile('acme/checkout-api', head, 'data/empty.txt')).toBe('');
+      expect(await gh.getFile('acme/checkout-api', head, 'data/absent.txt')).toBeNull();
+    });
+  });
+
   it('refuses a branch that already exists', async () => {
     const gh = await github();
     const history = await gh.listCommits('acme/checkout-api', { limit: 10 });
@@ -188,6 +251,28 @@ describe('local Datadog twin', () => {
     expect(monitors.find((m) => m.name.includes('latency'))!.status).toBe('OK');
   });
 
+  // One request of `limit` entries, with no cursor, dropped everything past the
+  // first page without saying so.
+  it('pages logs by cursor and says when more matched than were read', async () => {
+    const dd = datadog();
+    const base = Date.parse('2026-09-13T14:40:00Z');
+    server.current.logs = Array.from({ length: 250 }, (_, i) => ({
+      at: base + i * 1000, service: 'checkout-api', level: 'error', message: `e${i}`, stack: null, attributes: {},
+    }));
+    const window = { from: new Date(base - 1), to: new Date(base + 300_000) };
+
+    const some = await dd.queryLogs('checkout-api', window, { level: 'error', limit: 200 });
+    expect(some).toHaveLength(200);
+    expect(some.truncated).toBe(true);
+    // The budget went on the newest entries, returned oldest-first.
+    expect(some[0]!.message).toBe('e50');
+    expect(some.at(-1)!.message).toBe('e249');
+
+    const all = await dd.queryLogs('checkout-api', window, { level: 'error', limit: 500 });
+    expect(all).toHaveLength(250);
+    expect(all.truncated).toBe(false);
+  });
+
   it('answers a malformed query with an error rather than an empty series', async () => {
     const dd = datadog();
     // No service tag: the adapter must not read this as "no data, all healthy".
@@ -212,6 +297,14 @@ describe('local Slack twin', () => {
       'Production regression detected',
       'Investigation update',
     ]);
+  });
+
+  it('reads a whole thread, following the replies cursor', async () => {
+    const slack = new SlackProvider({ baseUrl: endpoints.slack });
+    const thread = await slack.openThread('#incidents', 'opening');
+    for (let i = 0; i < 4; i++) await slack.replyInThread(thread, `reply ${i}`);
+    const read = await slack.readThread(thread);
+    expect(read.map((m) => m.text)).toEqual(['opening', 'reply 0', 'reply 1', 'reply 2', 'reply 3']);
   });
 
   it('rejects an unknown channel the way Slack does, with ok:false', async () => {

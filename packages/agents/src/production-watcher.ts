@@ -47,6 +47,11 @@ export interface ProductionAlert {
    * the query that actually returned them rather than at a summary.
    */
   toolCallIds: { monitors: string; logs: string | null };
+  /**
+   * The log read stopped at its limit with more available, so cluster counts are
+   * lower bounds. Null when the provider did not say.
+   */
+  logsTruncated: boolean | null;
 }
 
 export interface WatchOptions {
@@ -189,6 +194,7 @@ export class ProductionWatcher {
         novelty: null,
         escalate: false,
         toolCallIds: { monitors: monitorsCall.toolCallId, logs: logsCall.toolCallId },
+        logsTruncated: logs.truncated ?? null,
         rationale:
           `Monitor "${alerting.name}" is alerting but produced no error logs in the ` +
           `surrounding ${Math.round((logWindow.to.getTime() - logWindow.from.getTime()) / 60_000)} minutes. ` +
@@ -211,9 +217,11 @@ export class ProductionWatcher {
       novelty,
       escalate: novelty.novel,
       toolCallIds: { monitors: monitorsCall.toolCallId, logs: logsCall.toolCallId },
+      logsTruncated: logs.truncated ?? null,
       rationale: novelty.novel
-        ? `Monitor "${alerting.name}" is alerting and ${primary.count} error(s) match no documented ` +
-          `failure mode. Escalating: ${primary.sample.slice(0, 120)}`
+        ? `Monitor "${alerting.name}" is alerting and ${primary.count}${logs.truncated ? '+' : ''} error(s) match no documented ` +
+          `failure mode${logs.truncated ? ' (the log read hit its limit, so counts are lower bounds)' : ''}. ` +
+          `Escalating: ${primary.sample.slice(0, 120)}`
         : `Monitor "${alerting.name}" is alerting, but this failure is documented. ${novelty.reason} ` +
           `Handle via its runbook rather than investigating from scratch.`,
     };

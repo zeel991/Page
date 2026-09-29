@@ -141,8 +141,14 @@ describe('Sandbox containment', () => {
     expect(result.stdout).toContain('; rm -rf /');
   });
 
+  it('refuses to build a sandbox from a truncated tree listing', async () => {
+    // A working copy missing files is not the tree that is failing.
+    const partial = { listFiles: async () => ({ paths: ['src/a.ts'], truncated: true }), getFile: async () => 'x' };
+    await expect(Sandbox.create(partial as never, 'acme/checkout-api', 'abc')).rejects.toThrow(/only part of/);
+  });
+
   it('refuses to build a sandbox from an empty revision', async () => {
-    const empty = { ...github, listFiles: async () => [] } as unknown as GitHubProvider;
+    const empty = { ...github, listFiles: async () => ({ paths: [], truncated: false }) } as unknown as GitHubProvider;
     await expect(Sandbox.create(empty, 'acme/checkout-api', 'abc')).rejects.toThrow(/no files/);
   });
 });

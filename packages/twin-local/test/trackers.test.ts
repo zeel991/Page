@@ -71,6 +71,16 @@ describe.each([
     expect((await tracker.getIssue(ref.id))!.description).toBe('original');
   });
 
+  // Jira returned the first 50 comments and Linear the first 50 nodes; the rest of
+  // an incident's history was dropped without a word.
+  it('reads every comment, across pages', async () => {
+    const tracker = make();
+    const ref = await tracker.createIssue({ title: 'paging', description: 'x' });
+    for (let i = 0; i < 5; i++) await tracker.addComment(ref.id, `update ${i}`);
+    const comments = await tracker.listComments(ref.id);
+    expect(comments.map((c) => c.body)).toEqual([0, 1, 2, 3, 4].map((i) => `update ${i}`));
+  });
+
   it('walks an incident through its states', async () => {
     const tracker = make();
     const ref = await tracker.createIssue({ title: 't', description: 'd' });
@@ -168,6 +178,34 @@ describe('Notion knowledge provider', () => {
   it('finds the title property by type, since database pages name it arbitrarily', async () => {
     // The twin exposes the title under "Name", not "title".
     expect((await notion().getDocument('doc-checkout-arch'))!.title).toBe('checkout-api architecture');
+  });
+
+  // Nested blocks (sub-bullets, toggle bodies) were not read at all.
+  it('reads nested blocks beneath their parent', async () => {
+    server.current.pages.push({
+      id: 'nested-page', title: 'Runbook: nested', parentId: null,
+      content: '- Restart the worker\n  - only after draining the queue\n- Page the owner',
+    });
+    const doc = await notion().getDocument('nested-page');
+    expect(doc!.content).toBe('- Restart the worker\n  - only after draining the queue\n- Page the owner');
+  });
+
+  // Notion takes at most 100 children per request; a longer write-up was refused whole.
+  it('writes a document longer than 100 blocks in batches', async () => {
+    const body = Array.from({ length: 250 }, (_, i) => `Paragraph ${i}.`).join('\n\n');
+    const created = await notion().createDocument({ title: 'Long postmortem', content: body });
+    const stored = server.current.pages.find((p) => p.id === created.id)!;
+    expect(stored.content.split('\n\n')).toHaveLength(250);
+    expect(stored.content.endsWith('Paragraph 249.')).toBe(true);
+  });
+
+  // The title was always sent as "title", which a database with a "Name" or
+  // "Incident" title property refuses.
+  it('sets the title under a database parent by the database’s own property name', async () => {
+    server.current.databases = [{ id: 'db-postmortems', titleProperty: 'Incident' }];
+    const db = new NotionProvider({ baseUrl: endpoints.notion, token: 'secret_test', parentDatabaseId: 'db-postmortems' });
+    const created = await db.createDocument({ title: 'INC-1 write-up', content: 'Body.' });
+    expect(server.current.pages.find((p) => p.id === created.id)!.title).toBe('INC-1 write-up');
   });
 
   it('returns null for a missing document', async () => {

@@ -53,7 +53,7 @@ function stubScm(over: Partial<SourceControlProvider> = {}): SourceControlProvid
       },
     ],
     getFile: async () => null,
-    listFiles: async () => [],
+    listFiles: async () => ({ paths: [], truncated: false }),
     createBranch: async () => { throw new Error('not stubbed'); },
     createPullRequest: async () => { throw new Error('not stubbed'); },
     cloneUrl: () => 'https://git.test/acme/checkout-api.git',

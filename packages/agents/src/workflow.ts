@@ -476,7 +476,9 @@ export class IncidentWorkflow {
           return value;
         });
         changedFiles = diff.files.map((f) => f.path);
-        if (changedFiles.length === 0) {
+        if (diff.truncated) {
+          diffGap = `The deployment diff is truncated at ${changedFiles.length} file(s); files not listed may still have changed.`;
+        } else if (changedFiles.length === 0) {
           diffGap = `The provider returned no changed files for ${revision.previousSha.slice(0, 12)}..${revision.sha.slice(0, 12)}. The diff is unknown, not empty.`;
         }
       } catch (err) {

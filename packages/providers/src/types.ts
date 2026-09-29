@@ -15,6 +15,19 @@ export interface Diff {
   files: ChangedFile[];
   /** Unified patch text, when the provider supplies it. */
   patch: string | null;
+  /**
+   * True when the provider returned only part of the diff (GitHub's compare stops at
+   * 300 files; a tree listing can be truncated). `files` is then a lower bound, and
+   * a file absent from it may still have changed.
+   */
+  truncated: boolean;
+}
+
+/** Every path at a revision, or as many as the provider would list. */
+export interface FileListing {
+  paths: string[];
+  /** True when the provider stopped short. The listing is then incomplete, not the tree. */
+  truncated: boolean;
 }
 
 export interface PullRequest {
@@ -77,7 +90,7 @@ export interface SourceControlProvider {
   listPullRequestsForCommit(repo: string, sha: string): Promise<PullRequest[]>;
   getFile(repo: string, ref: string, path: string): Promise<string | null>;
   /** Every file path present at a revision. Used to materialise a sandbox. */
-  listFiles(repo: string, ref: string): Promise<string[]>;
+  listFiles(repo: string, ref: string): Promise<FileListing>;
   createBranch(repo: string, fromSha: string, name: string): Promise<Branch>;
   /**
    * A branch, or null when it does not exist.
@@ -160,10 +173,19 @@ export interface LogEntry {
 export const LOG_FACETS = ['env', 'version', 'host', 'http.method', 'http.status_code', 'http.url_details.path', 'error.kind'] as const;
 export type LogFacet = (typeof LOG_FACETS)[number];
 
+/**
+ * Log entries, oldest first, and whether more matched than were read.
+ *
+ * `truncated: true` means the read stopped at its limit with more available, so
+ * counts derived from it are lower bounds. Undefined means the provider did not say.
+ */
+export type LogEntries = LogEntry[] & { truncated?: boolean };
+
 export interface MonitorState {
   id: string;
   name: string;
-  status: 'OK' | 'WARN' | 'ALERT' | 'NO_DATA';
+  /** UNKNOWN is a state the provider reported that we do not model — never read as NO_DATA. */
+  status: 'OK' | 'WARN' | 'ALERT' | 'NO_DATA' | 'UNKNOWN';
   service: string;
   query: string;
   transitionedAt: Date | null;
@@ -185,7 +207,7 @@ export interface ObservabilityProvider {
     service: string,
     range: TimeRange,
     opts?: { level?: LogEntry['level']; filters?: Partial<Record<LogFacet, string>>; limit?: number },
-  ): Promise<LogEntry[]>;
+  ): Promise<LogEntries>;
   listMonitors(service: string): Promise<MonitorState[]>;
 }
 

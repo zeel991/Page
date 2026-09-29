@@ -79,6 +79,12 @@ export class DeploymentObserver {
             this.sourceControl.getDiff(repo, base, head),
           );
           changedFiles = diffResult.value.files;
+          if (diffResult.value.truncated) {
+            gaps.push(
+              `Diff ${base}..${head} is truncated: the provider returned ${changedFiles.length} file(s) and stopped. ` +
+                `Files not listed may still have changed.`,
+            );
+          }
 
           const commitsResult = await ctx.tool('github.listCommitsBetween', { repo, base, head }, () =>
             this.sourceControl.listCommitsBetween(repo, base, head),

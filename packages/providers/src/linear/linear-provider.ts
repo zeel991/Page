@@ -124,15 +124,40 @@ export class LinearProvider implements IssueTrackerProvider {
     return res.data;
   }
 
+  /**
+   * Every page of a Linear connection. Linear returns 50 nodes by default and says
+   * whether more exist in `pageInfo`; reading one page silently drops the rest.
+   */
+  private async all<N>(
+    operation: string,
+    fetch: (after: string | null) => Promise<{ nodes: N[]; pageInfo?: { hasNextPage: boolean; endCursor: string | null } } | null>,
+  ): Promise<N[] | null> {
+    const out: N[] = [];
+    let after: string | null = null;
+    for (let page = 0; page < 50; page++) {
+      const conn = await fetch(after);
+      if (!conn) return page === 0 ? null : out;
+      out.push(...conn.nodes);
+      if (!conn.pageInfo?.hasNextPage || !conn.pageInfo.endCursor) return out;
+      after = conn.pageInfo.endCursor;
+    }
+    throw new LinearApiError(operation, ['more pages than this adapter will read']);
+  }
+
   /** Workflow states for the configured team. Cached: they change rarely. */
   private async workflowStates(): Promise<LinearWorkflowState[]> {
     if (this.statesCache) return this.statesCache;
-    const data = await this.query<{ team: { states: { nodes: LinearWorkflowState[] } } }>(
-      'workflowStates',
-      `query States($teamId: String!) { team(id: $teamId) { states { nodes { id name type } } } }`,
-      { teamId: this.teamId },
-    );
-    this.statesCache = data.team.states.nodes;
+    const states = await this.all<LinearWorkflowState>('workflowStates', async (after) => {
+      const data = await this.query<{ team: { states: { nodes: LinearWorkflowState[]; pageInfo?: { hasNextPage: boolean; endCursor: string | null } } } }>(
+        'workflowStates',
+        `query States($teamId: String!, $after: String) {
+           team(id: $teamId) { states(first: 100, after: $after) { nodes { id name type } pageInfo { hasNextPage endCursor } } }
+         }`,
+        { teamId: this.teamId, after },
+      );
+      return data.team.states;
+    });
+    this.statesCache = states ?? [];
     return this.statesCache;
   }
 
@@ -233,12 +258,18 @@ export class LinearProvider implements IssueTrackerProvider {
   }
 
   async listComments(idOrKey: string): Promise<IssueComment[]> {
-    const data = await this.query<{ issue: { comments: { nodes: { id: string; body: string; createdAt: string }[] } } | null }>(
-      'comments',
-      `query Comments($id: String!) { issue(id: $id) { comments { nodes { id body createdAt } } } }`,
-      { id: idOrKey },
-    );
-    return (data.issue?.comments.nodes ?? []).map((c) => ({
+    type Conn = { nodes: { id: string; body: string; createdAt: string }[]; pageInfo?: { hasNextPage: boolean; endCursor: string | null } };
+    const nodes = await this.all('comments', async (after) => {
+      const data = await this.query<{ issue: { comments: Conn } | null }>(
+        'comments',
+        `query Comments($id: String!, $after: String) {
+           issue(id: $id) { comments(first: 100, after: $after) { nodes { id body createdAt } pageInfo { hasNextPage endCursor } } }
+         }`,
+        { id: idOrKey, after },
+      );
+      return data.issue?.comments ?? null;
+    });
+    return (nodes ?? []).map((c) => ({
       id: c.id,
       body: c.body,
       createdAt: new Date(c.createdAt),

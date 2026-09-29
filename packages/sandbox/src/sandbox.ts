@@ -93,7 +93,15 @@ export class Sandbox {
     await Promise.all(['work', 'home', 'tmp'].map((d) => mkdir(join(root, d))));
     const sandbox = new Sandbox(root, join(root, 'work'), revision, opts);
 
-    const paths = await provider.listFiles(repo, revision);
+    const listing = await provider.listFiles(repo, revision);
+    if (listing.truncated) {
+      // A sandbox missing files would test a tree that is not the failing one.
+      throw new Error(
+        `Cannot build a sandbox: the provider listed only part of ${repo}@${revision}. ` +
+          `Refusing to run against an incomplete working copy.`,
+      );
+    }
+    const paths = listing.paths;
     if (paths.length === 0) {
       throw new Error(
         `Cannot build a sandbox: ${repo}@${revision} reported no files. ` +

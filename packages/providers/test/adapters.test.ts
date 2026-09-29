@@ -79,6 +79,19 @@ describe('DatadogProvider', () => {
     await expect(dd.queryMetric('a},service:{b', 'error_rate', range)).rejects.toThrow(/unsafe service/);
   });
 
+  // Ignored, Skipped and Unknown all became NO_DATA, which reads as "quiet".
+  it('reports a monitor state it does not model as UNKNOWN, not NO_DATA', async () => {
+    const dd = new DatadogProvider({
+      baseUrl: 'https://dd.test',
+      fetchImpl: jsonFetch(() => [
+        { id: 1, name: 'a', overall_state: 'Ignored' },
+        { id: 2, name: 'b', overall_state: 'No Data' },
+      ]),
+    });
+    const states = (await dd.listMonitors('s')).map((m) => m.status).sort();
+    expect(states).toEqual(['NO_DATA', 'UNKNOWN']);
+  });
+
   it('drops null gaps rather than reading them as zero', async () => {
     const dd = new DatadogProvider({
       baseUrl: 'https://dd.test',

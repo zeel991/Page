@@ -174,7 +174,11 @@ export class RecoveryVerifier {
       const res = await ctx.tool('datadog.listMonitors', { service }, () =>
         this.observability.listMonitors(service),
       );
-      return res.value.every((m) => m.status === 'OK' || m.status === 'NO_DATA');
+      // Any monitor still firing contradicts recovery; one in a state we do not
+      // model means we cannot tell.
+      if (res.value.some((m) => m.status === 'ALERT' || m.status === 'WARN')) return false;
+      if (res.value.some((m) => m.status === 'UNKNOWN')) return null;
+      return true;
     } catch {
       return null;
     }

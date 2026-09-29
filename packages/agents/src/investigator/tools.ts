@@ -121,13 +121,21 @@ const TOOLS: InvestigationTool[] = [
             limit: typeof args.limit === 'number' ? Math.min(args.limit, 50) : 25,
           }),
       );
-      return value.map((entry) => ({
-        at: entry.at.toISOString(),
-        level: entry.level,
-        message: entry.message,
-        stackTrace: entry.stackTrace,
-        attributes: entry.attributes,
-      }));
+      return {
+        entries: value.map((entry) => ({
+          at: entry.at.toISOString(),
+          level: entry.level,
+          message: entry.message,
+          stackTrace: entry.stackTrace,
+          attributes: entry.attributes,
+        })),
+        truncated: value.truncated ?? null,
+        ...(value.truncated
+          ? { note: 'More log entries matched than were returned: these are the most recent. Counts are lower bounds.' }
+          : value.truncated === undefined
+            ? { note: 'The provider did not say whether more entries matched.' }
+            : {}),
+      };
     },
   },
   {
@@ -180,7 +188,14 @@ const TOOLS: InvestigationTool[] = [
         { repo: target.repository, ref: target.deployedRevision },
         () => providers.sourceControl.listFiles(target.repository, target.deployedRevision),
       );
-      return { revision: target.deployedRevision, paths: value };
+      return {
+        revision: target.deployedRevision,
+        paths: value.paths,
+        truncated: value.truncated,
+        ...(value.truncated
+          ? { note: 'The provider listed only part of the tree. A path absent here may still exist; read it directly.' }
+          : {}),
+      };
     },
   },
   {
@@ -248,8 +263,10 @@ const TOOLS: InvestigationTool[] = [
         headSha: value.headSha,
         files: value.files,
         patch: value.patch,
-        note:
-          value.files.length === 0
+        truncated: value.truncated,
+        note: value.truncated
+          ? 'This diff is TRUNCATED: the provider returned only part of it. A file absent here may still have changed.'
+          : value.files.length === 0
             ? 'The provider returned no changed files. Treat this as an unknown diff, not an empty one.'
             : undefined,
       };

@@ -193,7 +193,7 @@ describe('recovery verdict', () => {
     postRemediationWindow: { from: new Date('2026-09-14T11:00:00Z'), to: new Date('2026-09-14T11:30:00Z') },
   };
 
-  function verifierOver(points: Record<string, number[] | null>) {
+  function verifierOver(points: Record<string, number[] | null>, monitors: { status: string }[] = []) {
     const observability = {
       kind: 'observability' as const,
       async queryMetric(_s: string, metric: string, range: { from: Date }) {
@@ -209,7 +209,7 @@ describe('recovery verdict', () => {
         };
       },
       async queryLogs() { return []; },
-      async listMonitors() { return []; },
+      async listMonitors() { return monitors; },
     };
     return new RecoveryVerifier(observability as never);
   }
@@ -277,6 +277,14 @@ describe('recovery verdict', () => {
     expect(r.verdict).toBe('UNVERIFIABLE');
     expect(r.postFixRequests).toBeNull();
     expect(r.summary).toMatch(/traffic after the fix could not be measured/);
+  });
+
+  it('treats a monitor in an unmodelled state as unknown, not as cleared', async () => {
+    const r = await run(verifierOver({
+      'error_rate:baseline': [0.004], 'error_rate:incident': [0.18], 'error_rate:post': [0.005],
+      'request_throughput:post': [2],
+    }, [{ status: 'UNKNOWN' }]));
+    expect(r.monitorsRecovered).toBeNull();
   });
 
   it('never claims recovery from an unmeasured signal', async () => {

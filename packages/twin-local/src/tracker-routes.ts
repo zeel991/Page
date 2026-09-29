@@ -187,10 +187,16 @@ export function jiraRoutes(): Route[] {
       handler: (ctx) => {
         const issue = findIssue(ctx.state, ctx.params[0]!);
         if (!issue) return { status: 404, body: { errorMessages: ['Issue does not exist'] } };
+        // Jira pages comments; the twin's page is small so callers must follow it.
+        const startAt = Number(ctx.query.startAt ?? 0);
+        const maxResults = Math.min(Number(ctx.query.maxResults ?? 50), 2);
         return {
           status: 200,
           body: {
-            comments: issue.comments.map((c) => ({
+            startAt,
+            maxResults,
+            total: issue.comments.length,
+            comments: issue.comments.slice(startAt, startAt + maxResults).map((c) => ({
               id: c.id,
               body: textToAdf(c.body),
               created: c.createdAt,
@@ -248,8 +254,18 @@ export function linearRoutes(): Route[] {
 
         const fail = (message: string) => ({ status: 200, body: { errors: [{ message }] } });
 
-        if (query.includes('states {')) {
-          return { status: 200, body: { data: { team: { states: { nodes: LINEAR_STATES } } } } };
+        // Connections are paged, two nodes at a time, so callers must follow pageInfo.
+        const page = <T>(nodes: T[]) => {
+          const start = Number(vars.after ?? 0);
+          const next = start + 2;
+          return {
+            nodes: nodes.slice(start, next),
+            pageInfo: { hasNextPage: next < nodes.length, endCursor: next < nodes.length ? String(next) : null },
+          };
+        };
+
+        if (query.includes('states(')) {
+          return { status: 200, body: { data: { team: { states: page(LINEAR_STATES) } } } };
         }
 
         if (query.includes('issueCreate')) {
@@ -303,10 +319,10 @@ export function linearRoutes(): Route[] {
           };
         }
 
-        if (query.includes('comments {')) {
+        if (query.includes('comments(')) {
           const issue = findIssue(ctx.state, String(vars.id ?? ''));
           if (!issue) return { status: 200, body: { data: { issue: null } } };
-          return { status: 200, body: { data: { issue: { comments: { nodes: issue.comments } } } } };
+          return { status: 200, body: { data: { issue: { comments: page(issue.comments) } } } };
         }
 
         if (query.includes('issue(')) {
@@ -336,39 +352,45 @@ function notionPageJson(page: StoredPage) {
   };
 }
 
-/** Render stored plain text back into Notion blocks. */
-function pageBlocks(page: StoredPage): NotionBlockJson[] {
-  return page.content
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    .map((line, i) => {
-      const heading = /^(#{1,3})\s+(.*)$/.exec(line);
-      if (heading) {
-        const level = heading[1]!.length;
-        return {
-          object: 'block',
-          id: `${page.id}-b${i}`,
-          type: `heading_${level}`,
-          [`heading_${level}`]: { rich_text: [{ type: 'text', plain_text: heading[2]! }] },
-        };
-      }
-      const bullet = /^-\s+(.*)$/.exec(line);
-      if (bullet) {
-        return {
-          object: 'block',
-          id: `${page.id}-b${i}`,
-          type: 'bulleted_list_item',
-          bulleted_list_item: { rich_text: [{ type: 'text', plain_text: bullet[1]! }] },
-        };
-      }
-      return {
-        object: 'block',
-        id: `${page.id}-b${i}`,
-        type: 'paragraph',
-        paragraph: { rich_text: [{ type: 'text', plain_text: line }] },
-      };
-    });
+/**
+ * Render stored plain text back into Notion blocks.
+ *
+ * A line indented by two spaces is a child of the block above it, as a sub-bullet
+ * or a toggle's body is in Notion, so readers must follow `has_children`.
+ */
+function pageTree(page: StoredPage): { top: NotionBlockJson[]; children: Map<string, NotionBlockJson[]> } {
+  const top: NotionBlockJson[] = [];
+  const children = new Map<string, NotionBlockJson[]>();
+  page.content.split('\n').forEach((raw, i) => {
+    if (raw.trim().length === 0) return;
+    const nested = /^ {2}\S/.test(raw) && top.length > 0;
+    const block = lineBlock(`${page.id}-b${i}`, raw.trim());
+    if (nested) {
+      const parent = top.at(-1)!;
+      parent.has_children = true;
+      children.set(parent.id, [...(children.get(parent.id) ?? []), block]);
+    } else {
+      top.push(block);
+    }
+  });
+  return { top, children };
 }
+
+function lineBlock(id: string, line: string): NotionBlockJson {
+  const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+  if (heading) {
+    const level = heading[1]!.length;
+    return { object: 'block', id, type: `heading_${level}`, [`heading_${level}`]: { rich_text: [{ type: 'text', plain_text: heading[2]! }] } };
+  }
+  const bullet = /^-\s+(.*)$/.exec(line);
+  if (bullet) {
+    return { object: 'block', id, type: 'bulleted_list_item', bulleted_list_item: { rich_text: [{ type: 'text', plain_text: bullet[1]! }] } };
+  }
+  return { object: 'block', id, type: 'paragraph', paragraph: { rich_text: [{ type: 'text', plain_text: line }] } };
+}
+
+/** Notion's limit on children in one create or append request. */
+const NOTION_MAX_CHILDREN = 100;
 
 interface NotionBlockJson {
   object: string;
@@ -440,9 +462,12 @@ export function notionRoutes(): Route[] {
       method: 'GET',
       pattern: /^\/v1\/blocks\/([^/]+)\/children$/,
       handler: (ctx) => {
-        const page = ctx.state.pages.find((p) => p.id === ctx.params[0]);
+        const id = decodeURIComponent(ctx.params[0]!);
+        // A page's own children, or a nested block's.
+        const page = ctx.state.pages.find((p) => p.id === id || id.startsWith(`${p.id}-b`));
         if (!page) return { status: 404, body: { object: 'error', code: 'object_not_found' } };
-        const all = pageBlocks(page);
+        const tree = pageTree(page);
+        const all = page.id === id ? tree.top : (tree.children.get(id) ?? []);
         const start = Number(ctx.query.start_cursor ?? 0);
         const slice = all.slice(start, start + NOTION_PAGE_SIZE);
         const next = start + NOTION_PAGE_SIZE;
@@ -455,6 +480,29 @@ export function notionRoutes(): Route[] {
             next_cursor: next < all.length ? String(next) : null,
           },
         };
+      },
+    },
+    {
+      method: 'PATCH',
+      pattern: /^\/v1\/blocks\/([^/]+)\/children$/,
+      handler: (ctx) => {
+        const page = ctx.state.pages.find((p) => p.id === decodeURIComponent(ctx.params[0]!));
+        if (!page) return { status: 404, body: { object: 'error', code: 'object_not_found' } };
+        const children = (ctx.json as { children?: unknown[] }).children ?? [];
+        if (children.length > NOTION_MAX_CHILDREN) {
+          return { status: 400, body: { object: 'error', code: 'validation_error', message: `body.children.length should be ≤ ${NOTION_MAX_CHILDREN}, instead was ${children.length}.` } };
+        }
+        page.content = [page.content, blocksToText(children)].filter(Boolean).join('\n\n');
+        return { status: 200, body: { object: 'list', results: [] } };
+      },
+    },
+    {
+      method: 'GET',
+      pattern: /^\/v1\/databases\/([^/]+)$/,
+      handler: (ctx) => {
+        const db = ctx.state.databases?.find((d) => d.id === decodeURIComponent(ctx.params[0]!));
+        if (!db) return { status: 404, body: { object: 'error', code: 'object_not_found' } };
+        return { status: 200, body: { object: 'database', id: db.id, properties: { [db.titleProperty]: { id: 'title', type: 'title', title: {} } } } };
       },
     },
     {
@@ -472,6 +520,19 @@ export function notionRoutes(): Route[] {
         const parentId = body.parent?.page_id ?? body.parent?.database_id ?? null;
         if (!parentId) {
           return { status: 400, body: { object: 'error', code: 'validation_error', message: 'parent is required' } };
+        }
+        const children = Array.isArray(body.children) ? body.children : [];
+        if (children.length > NOTION_MAX_CHILDREN) {
+          return { status: 400, body: { object: 'error', code: 'validation_error', message: `body.children.length should be ≤ ${NOTION_MAX_CHILDREN}, instead was ${children.length}.` } };
+        }
+        // Under a database, the title must be set under the database's own name for it.
+        if (body.parent?.database_id) {
+          const db = ctx.state.databases?.find((d) => d.id === body.parent!.database_id);
+          if (!db) return { status: 404, body: { object: 'error', code: 'object_not_found' } };
+          const unknown = Object.keys(body.properties ?? {}).find((k) => k !== db.titleProperty);
+          if (unknown) {
+            return { status: 400, body: { object: 'error', code: 'validation_error', message: `${unknown} is not a property that exists.` } };
+          }
         }
         const titleProp = Object.values(body.properties ?? {}).find((p) => p.title);
         const title = titleProp?.title?.[0]?.text?.content ?? 'Untitled';

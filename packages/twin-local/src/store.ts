@@ -146,6 +146,14 @@ export interface TwinState {
   blobs: Map<string, string>;
   trees: Map<string, Map<string, string>>;
   emails: StoredEmail[];
+  /**
+   * GitHub's limits, lowerable so a test can reach them: a recursive tree listing
+   * stops (and says `truncated`) past this many entries, and contents over
+   * `inlineFileBytes` are not inlined.
+   */
+  limits?: { treeEntries?: number; inlineFileBytes?: number };
+  /** Notion databases, each naming its title property as Notion lets a workspace. */
+  databases?: { id: string; titleProperty: string }[];
 }
 
 /** Content-addressed sha, so the same seed always produces the same history. */
@@ -294,5 +302,7 @@ export function cloneState(state: TwinState): TwinState {
     blobs: new Map(state.blobs),
     trees: new Map([...state.trees].map(([k, v]) => [k, new Map(v)])),
     emails: state.emails.map((e) => ({ ...e, to: [...e.to] })),
+    ...(state.limits ? { limits: { ...state.limits } } : {}),
+    ...(state.databases ? { databases: state.databases.map((d) => ({ ...d })) } : {}),
   };
 }

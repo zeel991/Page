@@ -234,14 +234,23 @@ export class JiraProvider implements IssueTrackerProvider {
     return { id: res.id, body, createdAt: res.created ? new Date(res.created) : new Date() };
   }
 
+  /** Every comment, paged by `startAt`. The first page alone is 50 at most. */
   async listComments(idOrKey: string): Promise<IssueComment[]> {
-    const res = await this.http.get<{ comments?: { id: string; body?: unknown; created?: string }[] }>(
-      `/rest/api/3/issue/${segment(idOrKey, 'issue key')}/comment`,
-    );
-    return (res.comments ?? []).map((c) => ({
-      id: c.id,
-      body: fromAdf(c.body),
-      createdAt: c.created ? new Date(c.created) : new Date(0),
-    }));
+    const out: IssueComment[] = [];
+    for (let page = 0; page < 50; page++) {
+      const res = await this.http.get<{
+        comments?: { id: string; body?: unknown; created?: string }[];
+        startAt?: number;
+        maxResults?: number;
+        total?: number;
+      }>(`/rest/api/3/issue/${segment(idOrKey, 'issue key')}/comment`, { startAt: out.length, maxResults: 100 });
+      const batch = res.comments ?? [];
+      for (const c of batch) {
+        out.push({ id: c.id, body: fromAdf(c.body), createdAt: c.created ? new Date(c.created) : new Date(0) });
+      }
+      if (batch.length === 0 || (res.total !== undefined && out.length >= res.total)) return out;
+      if (res.total === undefined && batch.length < (res.maxResults ?? 100)) return out;
+    }
+    throw new Error(`Jira ${idOrKey} has more comments than this adapter will page through.`);
   }
 }
