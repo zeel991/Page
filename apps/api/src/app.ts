@@ -1,6 +1,7 @@
 import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance } from 'fastify';
-import type { Database } from '@pager/db';
+import type { CredentialVault, Database } from '@pager/db';
+import { registerCredentialRoutes } from './credential-routes.ts';
 import { internalGuard, sessionGuard } from './auth.ts';
 import { registerInternalRoutes } from './internal-routes.ts';
 import { registerConsoleRoutes } from './routes.ts';
@@ -11,6 +12,8 @@ export interface AppDeps {
   sessionSecret: string;
   /** The console's origin. The only origin a browser may call from. */
   webOrigin: string;
+  /** Tenant secrets, envelope-encrypted under PAGER_MASTER_KEY. */
+  vault: CredentialVault;
   logLevel?: string;
 }
 
@@ -31,6 +34,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(async (scoped) => {
     scoped.addHook('preHandler', session);
     await registerConsoleRoutes(scoped, { db: deps.db });
+    await registerCredentialRoutes(scoped, { vault: deps.vault, log: (line) => app.log.info(line) });
   });
   await app.register(async (scoped) => {
     scoped.addHook('preHandler', internal);

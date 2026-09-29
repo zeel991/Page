@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { signToken } from '@pager/core';
+import { randomBytes } from 'node:crypto';
+import { LocalKeyWrapper, signToken } from '@pager/core';
 import {
+  CredentialVault,
   IdentityRepository,
   agentRuns,
   createDatabase,
@@ -69,7 +71,10 @@ const get = (url: string, token?: string) =>
 beforeEach(async () => {
   handle = await createDatabase('pglite://memory');
   await migrate(handle);
-  app = await buildApp({ db: handle.db, sessionSecret: SECRET, webOrigin: 'http://console.test' });
+  app = await buildApp({
+    db: handle.db, sessionSecret: SECRET, webOrigin: 'http://console.test',
+    vault: new CredentialVault(handle.db, new LocalKeyWrapper(randomBytes(32).toString('base64'))),
+  });
   a = await tenant('alice', '1001');
   b = await tenant('bob', '1002');
 });
@@ -131,6 +136,36 @@ describe('workspace isolation', () => {
     expect(res.headers['access-control-allow-origin']).toBeUndefined();
     const ok = await app.inject({ method: 'OPTIONS', url: '/api/incidents', headers: { origin: 'http://console.test', 'access-control-request-method': 'GET' } });
     expect(ok.headers['access-control-allow-origin']).toBe('http://console.test');
+  });
+});
+
+describe('credentials', () => {
+  const put = (kind: string, secret: string, token: string) =>
+    app.inject({ method: 'PUT', url: `/api/credentials/${kind}`, headers: { authorization: `Bearer ${token}` }, payload: { secret } });
+
+  it('stores a secret and never returns it, to anyone', async () => {
+    const res = await put('datadog.api_key', 'dd-api-0123456789abcdef', a.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain('0123456789');
+    const list = await get('/api/credentials', a.token);
+    expect(list.json()).toEqual({ credentials: [expect.objectContaining({ kind: 'datadog.api_key', last4: '…cdef' })] });
+    expect(list.body).not.toContain('0123456789');
+    // Another workspace sees none of it.
+    expect((await get('/api/credentials', b.token)).json()).toEqual({ credentials: [] });
+  });
+
+  it('only lets owners and admins set secrets', async () => {
+    const { memberships } = await import('@pager/db');
+    const identity = new IdentityRepository(handle.db);
+    const { user } = await identity.signIn({ provider: 'github', subject: '3001', login: 'dave', email: null, name: 'dave', avatarUrl: null });
+    await handle.db.insert(memberships).values({ userId: user.id, organizationId: a.org, role: 'member' });
+    const member = signToken(SECRET, 'api-session', { sub: user.id, org: a.org }, 300);
+    expect((await put('datadog.api_key', 'dd-api-0123456789abcdef', member)).statusCode).toBe(403);
+  });
+
+  it('will not take the Slack bot token from a form', async () => {
+    // It arrives only through Slack's OAuth callback, bound to a verified install.
+    expect((await put('slack.bot_token', 'xoxb-0123456789-abc', a.token)).statusCode).toBe(400);
   });
 });
 

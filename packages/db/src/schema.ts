@@ -101,10 +101,34 @@ export const integrations = pgTable('integrations', {
   /** Arga twin run id, when backend is 'arga'. */
   twinRunId: text('twin_run_id'),
   baseUrl: text('base_url'),
-  /** Never a secret. Credentials live in the process environment or the twin. */
+  /** Never a secret. Credentials live in integration_credentials, encrypted. */
   config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * A tenant's secret, envelope-encrypted.
+ *
+ * `integrations.config` is never a secret; credentials live here instead, one row
+ * per (workspace, kind). The plaintext is never stored and never returned by the
+ * API — only `last4`, for recognising which key is configured.
+ */
+export const integrationCredentials = pgTable('integration_credentials', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  integrationId: uuid('integration_id').references(() => integrations.id, { onDelete: 'cascade' }),
+  /** e.g. 'datadog.api_key', 'slack.bot_token', 'anthropic.api_key'. */
+  kind: text('kind').notNull(),
+  ciphertext: text('ciphertext').notNull(),
+  iv: text('iv').notNull(),
+  authTag: text('auth_tag').notNull(),
+  wrappedKey: text('wrapped_key').notNull(),
+  /** Which key-encryption key sealed this row. */
+  keyId: text('key_id').notNull(),
+  last4: text('last4').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  rotatedAt: timestamp('rotated_at', { withTimezone: true }),
+}, (t) => [uniqueIndex('credentials_org_kind_idx').on(t.organizationId, t.kind)]);
 
 export const repositories = pgTable('repositories', {
   id: uuid('id').primaryKey().defaultRandom(),

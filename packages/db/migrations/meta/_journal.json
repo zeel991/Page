@@ -15,6 +15,13 @@
       "when": 1790706134066,
       "tag": "0001_identity_and_org_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790706682788,
+      "tag": "0002_integration_credentials",
+      "breakpoints": true
     }
   ]
 }

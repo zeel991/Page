@@ -4,3 +4,4 @@ export * from './domain/deployment.js';
 export * from './policy/tools.js';
 export * from './redact.js';
 export * from './signed-token.js';
+export * from './envelope.js';

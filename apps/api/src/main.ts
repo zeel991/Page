@@ -1,3 +1,5 @@
+import { LocalKeyWrapper } from '@pager/core';
+import { CredentialVault } from '@pager/db';
 import { buildApp } from './app.ts';
 import { openDatabase } from './db.ts';
 
@@ -15,6 +17,7 @@ async function main(): Promise<void> {
     db: handle.db,
     sessionSecret: secret,
     webOrigin: process.env.PAGER_WEB_ORIGIN ?? 'http://127.0.0.1:4100',
+    vault: new CredentialVault(handle.db, new LocalKeyWrapper(process.env.PAGER_MASTER_KEY)),
     ...(process.env.LOG_LEVEL ? { logLevel: process.env.LOG_LEVEL } : {}),
   });
 
