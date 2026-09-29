@@ -11,3 +11,4 @@ export * from './console-reads.js';
 export * from './vault.js';
 export * from './installations.js';
 export * from './slack.js';
+export * from './services-config.js';

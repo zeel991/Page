@@ -33,6 +33,16 @@ const TWIN_LOG_PAGE = 100;
 export function datadogRoutes(): Route[] {
   return [
     {
+      // Datadog's key check. The twin accepts any key but an explicitly bad one, so
+      // "Test connection" can be seen to fail.
+      method: 'GET',
+      pattern: /^\/api\/v1\/validate$/,
+      handler: (ctx) =>
+        (ctx.headers['dd-api-key'] ?? '').includes('invalid')
+          ? { status: 403, body: { errors: ['Forbidden'] } }
+          : { status: 200, body: { valid: true } },
+    },
+    {
       method: 'GET',
       pattern: /^\/api\/v1\/query$/,
       handler: (ctx) => {

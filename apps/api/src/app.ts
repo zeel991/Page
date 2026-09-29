@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { CredentialVault, Database } from '@pager/db';
 import type { GitHubAppClient, SlackAppClient } from '@pager/providers';
 import { registerSlackRoutes } from './slack-routes.ts';
+import { registerConfigRoutes, type ConfigPolicy } from './config-routes.ts';
 import { registerCredentialRoutes } from './credential-routes.ts';
 import { registerGitHubRoutes, registerGitHubWebhook } from './github-routes.ts';
 import { internalGuard, sessionGuard } from './auth.ts';
@@ -21,6 +22,8 @@ export interface AppDeps {
   github?: GitHubAppClient | null;
   /** The operator's Slack app, and the console page Slack returns to after install. */
   slack?: { client: SlackAppClient; redirectUri: string } | null;
+  /** Relaxations for tests against local twins. Production leaves this unset. */
+  configPolicy?: ConfigPolicy;
   logLevel?: string;
 }
 
@@ -49,6 +52,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       vault: deps.vault,
       slack: deps.slack?.client ?? null,
       redirectUri: deps.slack?.redirectUri ?? `${deps.webOrigin}/onboarding/slack/callback`,
+    });
+    await registerConfigRoutes(scoped, {
+      db: deps.db,
+      vault: deps.vault,
+      github: deps.github ?? null,
+      slack: deps.slack?.client ?? null,
+      ...(deps.configPolicy ? { policy: deps.configPolicy } : {}),
     });
   });
   // Callers that are not the console: authenticated by their own signatures.

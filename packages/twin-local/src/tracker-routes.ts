@@ -421,6 +421,14 @@ const NOTION_PAGE_SIZE = 2;
 export function notionRoutes(): Route[] {
   return [
     {
+      method: 'GET',
+      pattern: /^\/v1\/users\/me$/,
+      handler: (ctx) =>
+        (ctx.headers.authorization ?? '').includes('invalid')
+          ? { status: 401, body: { object: 'error', code: 'unauthorized' } }
+          : { status: 200, body: { object: 'user', type: 'bot', name: 'Pager Developer' } },
+    },
+    {
       method: 'POST',
       pattern: /^\/v1\/search$/,
       handler: (ctx) => {

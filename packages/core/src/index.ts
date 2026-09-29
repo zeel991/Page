@@ -5,3 +5,4 @@ export * from './policy/tools.js';
 export * from './redact.js';
 export * from './signed-token.js';
 export * from './envelope.js';
+export * from './service-config.js';

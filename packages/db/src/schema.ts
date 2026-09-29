@@ -103,8 +103,11 @@ export const integrations = pgTable('integrations', {
   baseUrl: text('base_url'),
   /** Never a secret. Credentials live in integration_credentials, encrypted. */
   config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+  /** When "Test connection" last succeeded, and what it said when it did not. */
+  verifiedAt: timestamp('verified_at', { withTimezone: true }),
+  lastError: text('last_error'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [uniqueIndex('integrations_org_provider_idx').on(t.organizationId, t.provider)]);
 
 /**
  * A tenant's secret, envelope-encrypted.
@@ -192,6 +195,28 @@ export const services = pgTable('services', {
   name: text('name').notNull(),
   environment: environmentEnum('environment').notNull().default('production'),
   ownerTeam: text('owner_team'),
+  /**
+   * What watching it takes. Each was an environment variable of the single-tenant
+   * worker; each is validated by `ServiceConfig` when the service is saved.
+   */
+  healthUrl: text('health_url'),
+  alertSource: text('alert_source').notNull().default('datadog'),
+  slackChannelId: text('slack_channel_id'),
+  slackChannelName: text('slack_channel_name'),
+  /** Null: the repository's default branch. */
+  baseBranch: text('base_branch'),
+  autonomyLevel: text('autonomy_level').notNull().default('L3'),
+  readOnly: boolean('read_only').notNull().default(false),
+  intervalSeconds: integer('interval_seconds').notNull().default(60),
+  notionParentPageId: text('notion_parent_page_id'),
+  emailRecipients: jsonb('email_recipients').$type<string[]>().notNull().default([]),
+  /** Off: the worker does not poll it. Seeded demo services are off. */
+  enabled: boolean('enabled').notNull().default(false),
+  healthVerifiedAt: timestamp('health_verified_at', { withTimezone: true }),
+  healthLastError: text('health_last_error'),
+  /** What the worker last saw, for the console — the live status the old worker kept in memory. */
+  lastPolledAt: timestamp('last_polled_at', { withTimezone: true }),
+  lastPollOutcome: text('last_poll_outcome'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [uniqueIndex('services_org_name_env_idx').on(t.organizationId, t.name, t.environment)]);
 

@@ -32,7 +32,13 @@ export interface SafeResponse {
 }
 
 export interface SafeFetchOptions {
+  /** Idle timeout: how long the socket may sit silent. */
   timeoutMs?: number;
+  /**
+   * Total timeout: how long the whole request may take. The idle timeout alone lets
+   * a server trickle one byte every few seconds and hold the worker indefinitely.
+   */
+  totalTimeoutMs?: number;
   maxBytes?: number;
   /** Permit private addresses and plain http. For local drills only; never for tenants. */
   allowPrivate?: boolean;
@@ -62,6 +68,10 @@ for (const [net, prefix] of [
 for (const [net, prefix] of [
   ['::', 128],
   ['::1', 128],
+  // IPv4-compatible (::a.b.c.d, deprecated but still routed by some stacks) and 6to4
+  // (2002:aabb:ccdd::) both embed an IPv4 address that could be private.
+  ['::', 96],
+  ['2002::', 16],
   ['fc00::', 7],
   ['fe80::', 10],
   ['ff00::', 8],
@@ -135,6 +145,7 @@ export async function safeGet(rawUrl: string, opts: SafeFetchOptions = {}): Prom
   };
 
   const timeoutMs = opts.timeoutMs ?? 5_000;
+  const totalTimeoutMs = opts.totalTimeoutMs ?? Math.max(timeoutMs, 10_000);
   const maxBytes = opts.maxBytes ?? 64_000;
   const client = url.protocol === 'https:' ? https : http;
 
@@ -159,7 +170,12 @@ export async function safeGet(rawUrl: string, opts: SafeFetchOptions = {}): Prom
         res.on('error', reject);
       },
     );
+    const deadline = setTimeout(() => req.destroy(new Error(`did not complete within ${totalTimeoutMs} ms`)), totalTimeoutMs);
+    req.on('close', () => clearTimeout(deadline));
     req.on('timeout', () => req.destroy(new Error(`timed out after ${timeoutMs} ms`)));
-    req.on('error', reject);
+    req.on('error', (err) => {
+      clearTimeout(deadline);
+      reject(err);
+    });
   });
 }

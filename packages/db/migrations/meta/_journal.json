@@ -36,6 +36,13 @@
       "when": 1790707270058,
       "tag": "0004_slack_installations",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790707484516,
+      "tag": "0005_service_config",
+      "breakpoints": true
     }
   ]
 }

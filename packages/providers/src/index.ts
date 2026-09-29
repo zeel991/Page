@@ -14,3 +14,5 @@ export * from './email/resend-provider.js';
 export * from './safe-fetch.js';
 export * from './github/app-client.js';
 export * from './slack/slack-app.js';
+export * from './deployed-revision.js';
+export * from './connection-tests.js';

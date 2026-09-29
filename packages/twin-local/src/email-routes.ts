@@ -11,6 +11,17 @@ import type { Route } from './router.js';
 export function resendRoutes(): Route[] {
   return [
     {
+      method: 'GET',
+      pattern: /^\/domains$/,
+      handler: (ctx) => {
+        const auth = ctx.headers.authorization ?? '';
+        if (!auth.startsWith('Bearer ') || auth.includes('invalid')) {
+          return { status: 401, body: { name: 'missing_api_key', message: 'Missing API key' } };
+        }
+        return { status: 200, body: { data: [{ id: 'dom_twin', name: 'acme.dev', status: 'verified' }] } };
+      },
+    },
+    {
       method: 'POST',
       pattern: /^\/emails$/,
       handler: (ctx) => {
