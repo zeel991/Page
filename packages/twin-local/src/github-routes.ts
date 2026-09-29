@@ -4,6 +4,7 @@ import {
   commitSha,
   diffCommits,
   type StoredCommit,
+  type StoredInstallation,
   type StoredRepository,
   type TwinState,
 } from './store.js';
@@ -25,8 +26,47 @@ const UNAUTHENTICATED = {
   body: { message: 'Requires authentication', documentation_url: 'https://docs.github.com/rest' },
 };
 
-function findRepo(state: TwinState, owner: string, repo: string): StoredRepository | undefined {
-  return state.repositories.get(`${owner}/${repo}`);
+/**
+ * The repository, if the caller may reach it.
+ *
+ * An installation token reaches only the repositories its installation covers,
+ * narrowed further to those it was minted for; anything else is a 404, as on
+ * GitHub, which does not confirm that a private repository exists. A request with
+ * no token (the contents route serves public reads) is not narrowed.
+ */
+function findRepo(state: TwinState, owner: string, repo: string, headers?: Record<string, string>): StoredRepository | undefined {
+  const found = state.repositories.get(`${owner}/${repo}`);
+  if (!found || !headers) return found;
+  const token = bearerOf(headers);
+  const record = token ? state.installationTokens.get(token) : undefined;
+  if (!record) return token ? undefined : found;
+  const installation = state.installations.get(record.installationId);
+  if (!installation || installation.suspended || !covers(installation, found.fullName)) return undefined;
+  if (record.repositories && !record.repositories.includes(found.fullName)) return undefined;
+  return found;
+}
+
+function bearerOf(headers: Record<string, string>): string {
+  return (headers.authorization ?? '').replace(/^Bearer\s+/i, '').replace(/^token\s+/i, '');
+}
+
+export function covers(installation: StoredInstallation, fullName: string): boolean {
+  if (installation.repositorySelection === 'selected') return installation.repositories.includes(fullName);
+  return installation.anyOwner === true || fullName.split('/')[0] === installation.account.login;
+}
+
+function installationJson(i: StoredInstallation) {
+  return {
+    id: i.id,
+    account: { login: i.account.login, type: i.account.type },
+    repository_selection: i.repositorySelection,
+    suspended_at: i.suspended ? new Date(0).toISOString() : null,
+  };
+}
+
+function userFromToken(state: TwinState, headers: Record<string, string>) {
+  const id = state.userTokens.get(bearerOf(headers));
+  return id === undefined ? undefined : state.githubUsers.get(id);
 }
 
 function findCommit(repo: StoredRepository, ref: string): StoredCommit | undefined {
@@ -93,9 +133,7 @@ function prJson(repo: StoredRepository, pr: StoredRepository['pullRequests'][num
 
 /** True when the request carries an installation token this twin minted. */
 function isAuthenticated(state: TwinState, headers: Record<string, string>): boolean {
-  const auth = headers.authorization ?? '';
-  const token = auth.replace(/^Bearer\s+/i, '').replace(/^token\s+/i, '');
-  return state.installationTokens.has(token);
+  return state.installationTokens.has(bearerOf(headers));
 }
 
 /** Verify a GitHub App JWT against the app's own public key. */
@@ -135,6 +173,7 @@ export function githubRoutes(): Route[] {
         const manifest = JSON.parse(manifestRaw) as {
           name?: string;
           hook_attributes?: { url?: string };
+          setup_url?: string;
           default_permissions?: Record<string, string>;
         };
         if (!manifest.hook_attributes?.url) {
@@ -148,6 +187,10 @@ export function githubRoutes(): Route[] {
           slug: manifest.name ?? `app-${id}`,
           privateKeyPem: privateKey.export({ type: 'pkcs1', format: 'pem' }).toString(),
           permissions: manifest.default_permissions ?? {},
+          clientId: `Iv1.${randomBytes(8).toString('hex')}`,
+          clientSecret: randomBytes(20).toString('hex'),
+          webhookSecret: randomBytes(20).toString('hex'),
+          setupUrl: manifest.setup_url ?? null,
         });
 
         const code = randomBytes(20).toString('hex');
@@ -171,7 +214,15 @@ export function githubRoutes(): Route[] {
         const app = ctx.state.apps.get(appId)!;
         return {
           status: 201,
-          body: { id: app.id, slug: app.slug, pem: app.privateKeyPem, permissions: app.permissions },
+          body: {
+            id: app.id,
+            slug: app.slug,
+            pem: app.privateKeyPem,
+            permissions: app.permissions,
+            client_id: app.clientId,
+            client_secret: app.clientSecret,
+            webhook_secret: app.webhookSecret,
+          },
         };
       },
     },
@@ -181,7 +232,18 @@ export function githubRoutes(): Route[] {
       handler: (ctx) => {
         const appId = appFromJwt(ctx.state, ctx.headers);
         if (appId === null) return UNAUTHENTICATED;
-        return { status: 200, body: [{ id: 1, account: { login: 'acme' } }] };
+        return { status: 200, body: [...ctx.state.installations.values()].map(installationJson) };
+      },
+    },
+    {
+      method: 'GET',
+      pattern: /^\/app\/installations\/(\d+)$/,
+      handler: (ctx) => {
+        const appId = appFromJwt(ctx.state, ctx.headers);
+        if (appId === null) return UNAUTHENTICATED;
+        const installation = ctx.state.installations.get(Number(ctx.params[0]));
+        if (!installation) return { status: 404, body: { message: 'Not Found' } };
+        return { status: 200, body: installationJson(installation) };
       },
     },
     {
@@ -191,17 +253,153 @@ export function githubRoutes(): Route[] {
         const appId = appFromJwt(ctx.state, ctx.headers);
         if (appId === null) return UNAUTHENTICATED;
         const app = ctx.state.apps.get(appId)!;
+        const installation = ctx.state.installations.get(Number(ctx.params[0]));
+        if (!installation) return { status: 404, body: { message: 'Not Found' } };
+        if (installation.suspended) return { status: 403, body: { message: 'This installation has been suspended' } };
+
+        // Narrowing, as GitHub does it: names (not full names) of repositories the
+        // installation covers. Any name it does not cover refuses the whole request.
+        const names = (ctx.json as { repositories?: string[] } | null)?.repositories;
+        let narrowed: string[] | null = null;
+        if (Array.isArray(names)) {
+          narrowed = [];
+          for (const name of names) {
+            const full = [...ctx.state.repositories.keys()].find((k) => k.split('/')[1] === name && covers(installation, k));
+            if (!full) return { status: 422, body: { message: `There is at least one repository that does not exist or is not accessible to the parent installation.` } };
+            narrowed.push(full);
+          }
+        }
         const token = `ghs_${randomBytes(16).toString('hex')}`;
-        ctx.state.installationTokens.set(token, appId);
+        ctx.state.installationTokens.set(token, { appId, installationId: installation.id, repositories: narrowed });
         return {
           status: 201,
           body: {
             token,
             expires_at: new Date(ctx.now() + 3_600_000).toISOString(),
             permissions: app.permissions,
-            repository_selection: 'all',
+            repository_selection: narrowed ? 'selected' : installation.repositorySelection,
+            ...(narrowed ? { repositories: narrowed.map((full) => ({ full_name: full, name: full.split('/')[1] })) } : {}),
           },
         };
+      },
+    },
+    {
+      // Repositories an installation token can reach, paged like GitHub.
+      method: 'GET',
+      pattern: /^\/installation\/repositories$/,
+      handler: (ctx) => {
+        const record = ctx.state.installationTokens.get(bearerOf(ctx.headers));
+        if (!record) return UNAUTHENTICATED;
+        const installation = ctx.state.installations.get(record.installationId);
+        if (!installation || installation.suspended) return { status: 403, body: { message: 'This installation has been suspended' } };
+        const all = [...ctx.state.repositories.values()]
+          .filter((r) => covers(installation, r.fullName) && (!record.repositories || record.repositories.includes(r.fullName)))
+          .sort((x, y) => x.fullName.localeCompare(y.fullName));
+        const perPage = Math.min(Number(ctx.query.per_page ?? 30), 100);
+        const page = Math.max(1, Number(ctx.query.page ?? 1));
+        return {
+          status: 200,
+          body: {
+            total_count: all.length,
+            repositories: all.slice((page - 1) * perPage, page * perPage).map((r) => ({
+              id: Math.abs([...r.fullName].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7)),
+              full_name: r.fullName,
+              name: r.fullName.split('/')[1],
+              private: true,
+              default_branch: r.defaultBranch,
+            })),
+          },
+        };
+      },
+    },
+
+    // ── A person, signing in (OAuth user-to-server) ──────────────────────────
+    {
+      // No consent screen: the twin's user approves at once. `login` picks which
+      // twin user is signing in; it defaults to the first.
+      method: 'GET',
+      pattern: /^\/login\/oauth\/authorize$/,
+      handler: (ctx) => {
+        const redirect = ctx.query.redirect_uri;
+        if (!redirect) return { status: 400, body: { message: 'redirect_uri is required' } };
+        const user = [...ctx.state.githubUsers.values()].find((u) => u.login === ctx.query.login) ?? [...ctx.state.githubUsers.values()][0];
+        if (!user) return { status: 404, body: { message: 'no twin user' } };
+        const code = randomBytes(10).toString('hex');
+        ctx.state.oauthCodes.set(code, user.id);
+        const target = new URL(redirect);
+        target.searchParams.set('code', code);
+        if (ctx.query.state) target.searchParams.set('state', ctx.query.state);
+        return { status: 302, headers: { location: target.toString() }, body: '' };
+      },
+    },
+    {
+      method: 'POST',
+      pattern: /^\/login\/oauth\/access_token$/,
+      handler: (ctx) => {
+        const body = { ...(ctx.json as Record<string, string> | null ?? {}), ...Object.fromEntries(ctx.form) } as Record<string, string>;
+        const app = [...ctx.state.apps.values()].find((a) => a.clientId === body.client_id && a.clientSecret === body.client_secret);
+        // GitHub answers these with 200 and an error field, not an HTTP error.
+        if (!app) return { status: 200, body: { error: 'incorrect_client_credentials' } };
+        const userId = body.code ? ctx.state.oauthCodes.get(body.code) : undefined;
+        if (userId === undefined) return { status: 200, body: { error: 'bad_verification_code' } };
+        ctx.state.oauthCodes.delete(body.code!);
+        const token = `ghu_${randomBytes(16).toString('hex')}`;
+        ctx.state.userTokens.set(token, userId);
+        return { status: 200, body: { access_token: token, token_type: 'bearer', scope: '' } };
+      },
+    },
+    {
+      method: 'GET',
+      pattern: /^\/user$/,
+      handler: (ctx) => {
+        const user = userFromToken(ctx.state, ctx.headers);
+        if (!user) return UNAUTHENTICATED;
+        return { status: 200, body: { id: user.id, login: user.login, name: user.name, email: user.email, avatar_url: null } };
+      },
+    },
+    {
+      method: 'GET',
+      pattern: /^\/user\/installations$/,
+      handler: (ctx) => {
+        const user = userFromToken(ctx.state, ctx.headers);
+        if (!user) return UNAUTHENTICATED;
+        const list = user.installations.map((id) => ctx.state.installations.get(id)).filter((i): i is StoredInstallation => Boolean(i));
+        return { status: 200, body: { total_count: list.length, installations: list.map(installationJson) } };
+      },
+    },
+    {
+      // Stands in for github.com's install page: installs the app on the signing-in
+      // user's account (or `account`), on all repositories or `repositories`, and
+      // sends the browser to the app's setup URL with the installation id, the
+      // caller's state, and an OAuth code — GitHub's "request user authorization
+      // during installation".
+      method: 'GET',
+      pattern: /^\/apps\/([^/]+)\/installations\/new$/,
+      handler: (ctx) => {
+        const app = [...ctx.state.apps.values()].find((a) => a.slug === ctx.params[0]);
+        if (!app) return { status: 404, body: { message: 'Not Found' } };
+        const user = [...ctx.state.githubUsers.values()].find((u) => u.login === ctx.query.login) ?? [...ctx.state.githubUsers.values()][0];
+        if (!user) return { status: 404, body: { message: 'no twin user' } };
+        const selected = ctx.query.repositories ? ctx.query.repositories.split(',').filter(Boolean) : null;
+        const id = Math.max(0, ...ctx.state.installations.keys()) + 1;
+        ctx.state.installations.set(id, {
+          id,
+          account: { login: ctx.query.account ?? user.login, type: ctx.query.account ? 'Organization' : 'User' },
+          repositorySelection: selected ? 'selected' : 'all',
+          repositories: selected ?? [],
+          suspended: false,
+        });
+        user.installations.push(id);
+        const setup = ctx.query.setup_url ?? app.setupUrl;
+        if (!setup) return { status: 200, body: { installation_id: id } };
+        const code = randomBytes(10).toString('hex');
+        ctx.state.oauthCodes.set(code, user.id);
+        const target = new URL(setup);
+        target.searchParams.set('installation_id', String(id));
+        target.searchParams.set('setup_action', 'install');
+        target.searchParams.set('code', code);
+        if (ctx.query.state) target.searchParams.set('state', ctx.query.state);
+        return { status: 302, headers: { location: target.toString() }, body: '' };
       },
     },
 
@@ -210,7 +408,7 @@ export function githubRoutes(): Route[] {
       method: 'GET',
       pattern: /^\/repos\/([^/]+)\/([^/]+)$/,
       handler: (ctx) => {
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         return {
           status: 200,
@@ -229,7 +427,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/commits$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const limit = Number(ctx.query.per_page ?? 30);
         const start = ctx.query.sha ? repo.commits.findIndex((c) => c.sha === ctx.query.sha) : 0;
@@ -244,7 +442,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const commit = findCommit(repo, ctx.params[2]!);
         if (!commit) return { status: 404, body: { message: 'No commit found' } };
@@ -256,7 +454,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)\/pulls$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const sha = ctx.params[2]!;
         return {
@@ -273,7 +471,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/compare\/(.+)$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
 
         const [baseRef, headRef] = decodeURIComponent(ctx.params[2]!).split('...');
@@ -322,7 +520,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/trees\/([^/]+)$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const commit = findCommit(repo, ctx.params[2]!);
         if (!commit) return { status: 404, body: { message: 'Not Found' } };
@@ -348,7 +546,7 @@ export function githubRoutes(): Route[] {
       method: 'GET',
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/contents\/(.*)$/,
       handler: (ctx) => {
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const ref = ctx.query.ref ?? repo.defaultBranch;
         const commit = findCommit(repo, ref);
@@ -380,7 +578,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/pulls$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const state = ctx.query.state ?? 'open';
         const perPage = Math.min(Number(ctx.query.per_page ?? 30), 100);
@@ -399,7 +597,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         const pr = repo?.pullRequests.find((p) => p.number === Number(ctx.params[2]));
         if (!repo || !pr) return { status: 404, body: { message: 'Not Found' } };
         return { status: 200, body: prJson(repo, pr) };
@@ -412,7 +610,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)\/merge$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         const pr = repo?.pullRequests.find((p) => p.number === Number(ctx.params[2]));
         if (!repo || !pr) return { status: 404, body: { message: 'Not Found' } };
         // GitHub answers 405 for a pull request that cannot be merged. A twin that
@@ -439,7 +637,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/refs$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const body = ctx.json as { ref?: string; sha?: string };
         const name = (body.ref ?? '').replace(/^refs\/heads\//, '');
@@ -459,7 +657,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/pulls$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const body = ctx.json as { title?: string; body?: string; head?: string; base?: string };
         if (!body.title || !body.head || !body.base) {
@@ -495,7 +693,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/ref\/heads\/(.+)$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         const sha = repo?.branches.get(decodeURIComponent(ctx.params[2]!));
         if (!repo || !sha) return { status: 404, body: { message: 'Not Found' } };
         return {
@@ -509,7 +707,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/commits\/([^/]+)$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         const commit = repo ? findCommit(repo, ctx.params[2]!) : undefined;
         if (!repo || !commit) return { status: 404, body: { message: 'Not Found' } };
         return {
@@ -529,7 +727,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/blobs\/([^/]+)$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const sha = ctx.params[2]!;
         let content = ctx.state.blobs.get(sha);
@@ -569,7 +767,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/trees$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
 
         const body = ctx.json as {
@@ -601,7 +799,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/commits$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
 
         const body = ctx.json as {
@@ -634,7 +832,7 @@ export function githubRoutes(): Route[] {
       pattern: /^\/repos\/([^/]+)\/([^/]+)\/git\/refs\/heads\/(.+)$/,
       handler: (ctx) => {
         if (!isAuthenticated(ctx.state, ctx.headers)) return UNAUTHENTICATED;
-        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!);
+        const repo = findRepo(ctx.state, ctx.params[0]!, ctx.params[1]!, ctx.headers);
         if (!repo) return { status: 404, body: { message: 'Not Found' } };
         const body = ctx.json as { sha?: string };
         const branch = decodeURIComponent(ctx.params[2]!);

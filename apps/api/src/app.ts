@@ -1,7 +1,9 @@
 import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { CredentialVault, Database } from '@pager/db';
+import type { GitHubAppClient } from '@pager/providers';
 import { registerCredentialRoutes } from './credential-routes.ts';
+import { registerGitHubRoutes, registerGitHubWebhook } from './github-routes.ts';
 import { internalGuard, sessionGuard } from './auth.ts';
 import { registerInternalRoutes } from './internal-routes.ts';
 import { registerConsoleRoutes } from './routes.ts';
@@ -14,6 +16,8 @@ export interface AppDeps {
   webOrigin: string;
   /** Tenant secrets, envelope-encrypted under PAGER_MASTER_KEY. */
   vault: CredentialVault;
+  /** The operator's GitHub App. Null disables installing and repository picking. */
+  github?: GitHubAppClient | null;
   logLevel?: string;
 }
 
@@ -35,6 +39,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     scoped.addHook('preHandler', session);
     await registerConsoleRoutes(scoped, { db: deps.db });
     await registerCredentialRoutes(scoped, { vault: deps.vault, log: (line) => app.log.info(line) });
+    await registerGitHubRoutes(scoped, { db: deps.db, sessionSecret: deps.sessionSecret, github: deps.github ?? null });
+  });
+  // Callers that are not the console: authenticated by their own signatures.
+  await app.register(async (scoped) => {
+    await registerGitHubWebhook(scoped, { db: deps.db, github: deps.github ?? null });
   });
   await app.register(async (scoped) => {
     scoped.addHook('preHandler', internal);

@@ -37,13 +37,17 @@ export interface AppManifest {
   url: string;
   hookUrl: string;
   redirectUrl: string;
+  /** Where the browser goes after someone installs the app. */
+  setupUrl?: string;
   permissions?: Record<string, string>;
   events?: string[];
 }
 
 const DEFAULT_PERMISSIONS: Record<string, string> = {
-  // Exactly what the incident workflow needs, and nothing that could touch
-  // production: no administration, no workflow, no secrets, no deployments.
+  // What the incident workflow needs: no administration, no workflows, no secrets,
+  // no deployments. But contents:write with pull_requests:write IS enough to merge a
+  // pull request into the default branch. "Never merges on its own" is enforced in
+  // code (the merge tool needs L4 and a recorded human click), not by this token.
   contents: 'write',
   pull_requests: 'write',
   checks: 'write',
@@ -85,6 +89,7 @@ interface ManifestConversionResponse {
   pem?: string;
   client_id?: string;
   client_secret?: string;
+  webhook_secret?: string;
 }
 
 /**
@@ -97,13 +102,14 @@ export async function registerViaManifest(
   baseUrl: string,
   manifest: AppManifest,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
-): Promise<GitHubAppCredentials & { slug: string | undefined }> {
+): Promise<GitHubAppCredentials & { slug: string | undefined; clientId?: string; clientSecret?: string; webhookSecret?: string }> {
   const base = baseUrl.replace(/\/+$/, '');
   const body = new URLSearchParams({
     manifest: JSON.stringify({
       name: manifest.name,
       url: manifest.url,
       redirect_url: manifest.redirectUrl,
+      ...(manifest.setupUrl ? { setup_url: manifest.setupUrl, request_oauth_on_install: true } : {}),
       hook_attributes: { url: manifest.hookUrl },
       public: false,
       default_permissions: manifest.permissions ?? DEFAULT_PERMISSIONS,
@@ -145,7 +151,14 @@ export async function registerViaManifest(
   if (!app.pem) {
     throw new GitHubAppAuthError('Manifest conversion returned no private key');
   }
-  return { appId: app.id, privateKeyPem: app.pem, slug: app.slug };
+  return {
+    appId: app.id,
+    privateKeyPem: app.pem,
+    slug: app.slug,
+    ...(app.client_id ? { clientId: app.client_id } : {}),
+    ...(app.client_secret ? { clientSecret: app.client_secret } : {}),
+    ...(app.webhook_secret ? { webhookSecret: app.webhook_secret } : {}),
+  };
 }
 
 interface InstallationResponse {
@@ -181,6 +194,8 @@ export class InstallationResolutionError extends Error {
 export class GitHubAppTokenSource {
   private cached: InstallationToken | null = null;
   private installationId: number | null = null;
+  /** The mint in progress, shared by every caller that arrives while it runs. */
+  private inflight: Promise<string> | null = null;
 
   constructor(
     private readonly baseUrl: string,
@@ -190,6 +205,13 @@ export class GitHubAppTokenSource {
       now?: () => Date;
       installationId?: number;
       defaultInstallationId?: number;
+      /**
+       * Repository names (without the owner) the token may reach. An installation
+       * can cover many repositories; a job for one service should hold a token for
+       * that one, so a mistake or a prompt injection in one incident cannot write to
+       * another repository the customer installed the app on.
+       */
+      repositories?: string[];
     } = {},
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
@@ -230,19 +252,39 @@ export class GitHubAppTokenSource {
     );
   }
 
-  /** A valid installation token, reminted when the cached one is near expiry. */
+  /**
+   * A valid installation token, reminted when the cached one is near expiry.
+   *
+   * Concurrent callers share one mint. Without that, every request an agent fires
+   * in parallel at expiry minted its own token — wasteful, and against GitHub's
+   * rate limit for token creation.
+   */
   async token(): Promise<string> {
     const nowMs = this.now().getTime();
     if (this.cached && this.cached.expiresAt.getTime() - TOKEN_REFRESH_MARGIN_MS > nowMs) {
       return this.cached.token;
     }
+    if (!this.inflight) {
+      this.inflight = this.mint(nowMs).finally(() => {
+        this.inflight = null;
+      });
+    }
+    return this.inflight;
+  }
 
+  private async mint(nowMs: number): Promise<string> {
     const installationId = await this.resolveInstallationId();
     const jwt = signAppJwt(this.creds, this.now());
     const url = `${this.baseUrl}/app/installations/${installationId}/access_tokens`;
+    const repositories = this.opts.repositories;
     const res = await this.fetchImpl(url, {
       method: 'POST',
-      headers: { authorization: `Bearer ${jwt}`, accept: 'application/json' },
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        accept: 'application/json',
+        ...(repositories ? { 'content-type': 'application/json' } : {}),
+      },
+      ...(repositories ? { body: JSON.stringify({ repositories }) } : {}),
     });
     if (!res.ok) {
       throw new ProviderHttpError(res.status, 'POST', url, await res.text());

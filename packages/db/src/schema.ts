@@ -130,9 +130,32 @@ export const integrationCredentials = pgTable('integration_credentials', {
   rotatedAt: timestamp('rotated_at', { withTimezone: true }),
 }, (t) => [uniqueIndex('credentials_org_kind_idx').on(t.organizationId, t.kind)]);
 
+/**
+ * An installation of the Pager Developer GitHub App, bound to the workspace that
+ * installed it. An installation id belongs to at most one workspace: binding it to a
+ * second would hand that workspace the first one's repositories.
+ */
+export const githubInstallations = pgTable('github_installations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  installationId: integer('installation_id').notNull(),
+  accountLogin: text('account_login').notNull(),
+  accountType: text('account_type').notNull(),
+  repositorySelection: text('repository_selection').notNull(),
+  installedByUserId: uuid('installed_by_user_id').references(() => users.id),
+  suspendedAt: timestamp('suspended_at', { withTimezone: true }),
+  /** Set when GitHub reports the app uninstalled. The row is kept for the audit trail. */
+  removedAt: timestamp('removed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex('github_installations_installation_idx').on(t.installationId)]);
+
 export const repositories = pgTable('repositories', {
   id: uuid('id').primaryKey().defaultRandom(),
   organizationId: uuid('organization_id').notNull().references(() => organizations.id),
+  /** The installation this repository is reached through. Null for seeded demo rows. */
+  githubInstallationId: uuid('github_installation_id').references(() => githubInstallations.id),
+  /** Set when the repository is removed from the installation; no token can reach it. */
+  detachedAt: timestamp('detached_at', { withTimezone: true }),
   fullName: text('full_name').notNull(),
   defaultBranch: text('default_branch').notNull().default('main'),
   /** Cached repository understanding (§13), refreshed rather than rediscovered. */

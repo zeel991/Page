@@ -96,6 +96,39 @@ export interface GitHubApp {
   slug: string;
   privateKeyPem: string;
   permissions: Record<string, string>;
+  clientId: string;
+  clientSecret: string;
+  webhookSecret: string;
+  /** Where GitHub sends the browser after an install, as `setup_url` in the manifest. */
+  setupUrl: string | null;
+}
+
+/** An installation of an app on an account, covering all or some of its repositories. */
+export interface StoredInstallation {
+  id: number;
+  account: { login: string; type: 'User' | 'Organization' };
+  repositorySelection: 'all' | 'selected';
+  /** Full names, used when selection is 'selected'. */
+  repositories: string[];
+  suspended: boolean;
+  /** The seeded demo installation reaches every repository in the twin, whatever its owner. */
+  anyOwner?: boolean;
+}
+
+/** A person who can sign in to the twin, and the installations they can see. */
+export interface StoredGitHubUser {
+  id: number;
+  login: string;
+  name: string;
+  email: string | null;
+  installations: number[];
+}
+
+export interface StoredInstallationToken {
+  appId: number;
+  installationId: number;
+  /** Full names the token is narrowed to, or null for everything the installation covers. */
+  repositories: string[] | null;
 }
 
 export interface StoredIssue {
@@ -139,7 +172,12 @@ export interface TwinState {
   messages: StoredMessage[];
   apps: Map<number, GitHubApp>;
   manifestCodes: Map<string, number>;
-  installationTokens: Map<string, number>;
+  installationTokens: Map<string, StoredInstallationToken>;
+  installations: Map<number, StoredInstallation>;
+  githubUsers: Map<number, StoredGitHubUser>;
+  /** OAuth codes and user-to-server tokens, each naming a user id. */
+  oauthCodes: Map<string, number>;
+  userTokens: Map<string, number>;
   issues: StoredIssue[];
   pages: StoredPage[];
   /** Git object store, so the real blob/tree/commit flow works. */
@@ -268,6 +306,12 @@ export function emptyState(): TwinState {
     apps: new Map(),
     manifestCodes: new Map(),
     installationTokens: new Map(),
+    // One installation, on the demo account, covering every repository — what the
+    // twin always offered, now modelled rather than implied.
+    installations: new Map([[1, { id: 1, account: { login: 'acme', type: 'Organization' as const }, repositorySelection: 'all' as const, repositories: [], suspended: false, anyOwner: true }]]),
+    githubUsers: new Map([[1001, { id: 1001, login: 'octo', name: 'Octo Cat', email: 'octo@acme.dev', installations: [1] }]]),
+    oauthCodes: new Map(),
+    userTokens: new Map(),
     issues: [],
     pages: [],
     blobs: new Map(),
@@ -297,6 +341,10 @@ export function cloneState(state: TwinState): TwinState {
     apps: new Map(state.apps),
     manifestCodes: new Map(state.manifestCodes),
     installationTokens: new Map(state.installationTokens),
+    installations: new Map([...state.installations].map(([k, v]) => [k, { ...v, account: { ...v.account }, repositories: [...v.repositories] }])),
+    githubUsers: new Map([...state.githubUsers].map(([k, v]) => [k, { ...v, installations: [...v.installations] }])),
+    oauthCodes: new Map(state.oauthCodes),
+    userTokens: new Map(state.userTokens),
     issues: state.issues.map((i) => ({ ...i, labels: [...i.labels], comments: i.comments.map((c) => ({ ...c })) })),
     pages: state.pages.map((p) => ({ ...p })),
     blobs: new Map(state.blobs),

@@ -12,3 +12,4 @@ export * from './linear/linear-provider.js';
 export * from './notion/notion-provider.js';
 export * from './email/resend-provider.js';
 export * from './safe-fetch.js';
+export * from './github/app-client.js';

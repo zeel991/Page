@@ -166,3 +166,49 @@ describe('GitHubAppTokenSource', () => {
     expect(await src.resolveInstallationId()).toBe(22);
   });
 });
+
+describe('GitHubAppTokenSource minting', () => {
+  function counting() {
+    let mints = 0;
+    const bodies: unknown[] = [];
+    const fetchImpl = (async (url: string, init: RequestInit = {}) => {
+      if (String(url).endsWith('/access_tokens')) {
+        mints++;
+        bodies.push(init.body ? JSON.parse(String(init.body)) : null);
+        await new Promise((r) => setTimeout(r, 20));
+        return new Response(JSON.stringify({ token: `ghs_${mints}`, expires_at: '2099-01-01T00:00:00Z' }), { status: 201 });
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, mints: () => mints, bodies };
+  }
+
+  // Every parallel request an agent made at expiry minted its own token.
+  it('shares one mint between concurrent callers', async () => {
+    const c = counting();
+    const source = new GitHubAppTokenSource('https://api.github.test', creds, { installationId: 9, fetchImpl: c.fetchImpl });
+    const tokens = await Promise.all(Array.from({ length: 10 }, () => source.token()));
+    expect(new Set(tokens)).toEqual(new Set(['ghs_1']));
+    expect(c.mints()).toBe(1);
+  });
+
+  it('narrows the token to the repositories it is for', async () => {
+    const c = counting();
+    const source = new GitHubAppTokenSource('https://api.github.test', creds, { installationId: 9, repositories: ['checkout-api'], fetchImpl: c.fetchImpl });
+    await source.token();
+    expect(c.bodies).toEqual([{ repositories: ['checkout-api'] }]);
+  });
+
+  it('mints again after a failed mint rather than caching the failure', async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return calls === 1
+        ? new Response('{"message":"boom"}', { status: 500 })
+        : new Response(JSON.stringify({ token: 'ghs_ok', expires_at: '2099-01-01T00:00:00Z' }), { status: 201 });
+    }) as unknown as typeof fetch;
+    const source = new GitHubAppTokenSource('https://api.github.test', creds, { installationId: 9, fetchImpl });
+    await expect(source.token()).rejects.toThrow(/500/);
+    expect(await source.token()).toBe('ghs_ok');
+  });
+});

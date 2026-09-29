@@ -9,3 +9,4 @@ export * from './migrate.js';
 export * from './identity.js';
 export * from './console-reads.js';
 export * from './vault.js';
+export * from './installations.js';

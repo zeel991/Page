@@ -195,6 +195,25 @@ describe('local GitHub twin', () => {
     });
   });
 
+  // Tokens were minted for the whole installation, so one service's job could
+  // write to every repository the customer installed the app on.
+  it('confines a narrowed installation token to its repository', async () => {
+    const creds = await registerViaManifest(endpoints.github, PAGER_APP_MANIFEST(endpoints.github));
+    const narrow = new GitHubProvider({
+      baseUrl: endpoints.github,
+      tokenProvider: () => new GitHubAppTokenSource(endpoints.github, creds, { installationId: 1, repositories: ['checkout-api'] }).token(),
+    });
+    server.current.repositories.set('acme/other', { ...server.current.repositories.get('acme/checkout-api')!, fullName: 'acme/other' });
+    expect((await narrow.listCommits('acme/checkout-api', { limit: 1 })).length).toBe(1);
+    await expect(narrow.listCommits('acme/other', { limit: 1 })).rejects.toThrow(/404/);
+  });
+
+  it('refuses to mint a token for a repository the installation does not cover', async () => {
+    const creds = await registerViaManifest(endpoints.github, PAGER_APP_MANIFEST(endpoints.github));
+    const source = new GitHubAppTokenSource(endpoints.github, creds, { installationId: 1, repositories: ['not-installed'] });
+    await expect(source.token()).rejects.toThrow(/422/);
+  });
+
   it('refuses a branch that already exists', async () => {
     const gh = await github();
     const history = await gh.listCommits('acme/checkout-api', { limit: 10 });

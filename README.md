@@ -276,6 +276,12 @@ clicked — not against the agent.
 
 Repository content, logs and runbooks are treated as **data, never as instructions**.
 
+**What the GitHub token could do, and what stops it.** The GitHub App asks for
+`contents: write` and `pull_requests: write`, which is enough to merge a pull request.
+"Never merges on its own" is therefore enforced in code — merging needs autonomy L4
+and a recorded click by a workspace owner or admin — not by the token's scope. Each
+job's installation token is narrowed to the one repository it is working on.
+
 ---
 
 <p align="center">
