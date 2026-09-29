@@ -264,6 +264,9 @@ importers:
       '@pager/providers':
         specifier: workspace:*
         version: link:../../packages/providers
+      '@pager/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
 
   evals:
     dependencies:

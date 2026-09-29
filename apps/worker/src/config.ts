@@ -70,6 +70,12 @@ export interface WorkerConfig {
    */
   notion: { token: string; parentPageId: string } | null;
   email: { apiKey: string; from: string; to: string[] } | null;
+  /**
+   * Where repository code runs. `local` executes it on this host as this user and
+   * is for development only; `docker` runs each command in a locked-down container
+   * from `image`.
+   */
+  sandbox: { runner: 'local' } | { runner: 'docker'; image: string };
 }
 
 export const MIN_INTERVAL_SECONDS = 15;
@@ -154,7 +160,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
             to: env.PAGER_TEAM_EMAILS.split(',').map((e) => e.trim()).filter(Boolean),
           }
         : null,
+    sandbox:
+      env.PAGER_SANDBOX_RUNNER?.trim() === 'docker'
+        ? { runner: 'docker', image: env.PAGER_SANDBOX_IMAGE?.trim() || 'node:22-bookworm-slim' }
+        : { runner: 'local' },
   };
+
+  const runner = env.PAGER_SANDBOX_RUNNER?.trim();
+  if (runner && runner !== 'docker' && runner !== 'local') {
+    missing.push(`PAGER_SANDBOX_RUNNER (got "${runner}", expected docker or local)`);
+  }
 
   // Half a configuration is worse than none: it looks configured and silently
   // does nothing. Say which half is missing.
@@ -222,6 +237,11 @@ export function describeConfig(config: WorkerConfig): string {
     `autonomy       ${config.autonomy}`,
     `postmortem     ${config.notion ? `Notion page ${config.notion.parentPageId.slice(0, 8)}…` : 'off — no write-up will be filed'}`,
     `email          ${config.email ? `${config.email.to.length} recipient(s) via Resend` : 'off — nobody is mailed'}`,
+    `sandbox        ${
+      config.sandbox.runner === 'docker'
+        ? `docker (${config.sandbox.image}) — no network, read-only root, non-root, resource-limited`
+        : 'LOCAL PROCESS — DEVELOPMENT ONLY: repository code runs on this host as this user'
+    }`,
     `merge button   ${
       !config.mergeButton
         ? 'off — merging happens on GitHub'

@@ -23,6 +23,7 @@ import {
   singleTestCommand,
   testCountRegression,
   type ReproductionAttempt,
+  type SandboxRunner,
   type ValidationRun,
 } from '@pager/sandbox';
 import { ProductionWatcher, describeAlert, type ProductionAlert } from './production-watcher.js';
@@ -134,6 +135,11 @@ export interface WorkflowDeps {
   persistence?: WorkflowPersistence;
   /** Governs which write boundaries the workflow may cross. Defaults to L3. */
   autonomy?: AutonomyLevel;
+  /**
+   * Where repository code is executed. Defaults to the sandbox's
+   * `LocalProcessRunner`, which is for development only.
+   */
+  sandboxRunner?: SandboxRunner;
   /**
    * The clock.
    *
@@ -650,6 +656,7 @@ export class IncidentWorkflow {
     }
     const sandbox = await Sandbox.create(this.deps.sourceControl, input.repository, revision.sha, {
       ...(input.sandboxRoot ? { rootDir: input.sandboxRoot } : {}),
+      ...(this.deps.sandboxRunner ? { runner: this.deps.sandboxRunner } : {}),
     });
 
     try {

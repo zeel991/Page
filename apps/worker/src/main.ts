@@ -36,6 +36,7 @@ import {
   toRepositoryPath,
   type ProductionAlert,
 } from '@pager/agents';
+import { DockerRunner, LocalProcessRunner } from '@pager/sandbox';
 import { loadConfig, describeConfig, type WorkerConfig } from './config.ts';
 import { renderDashboard } from './dashboard.ts';
 import { handleSlackInteraction, type MergeApproval } from './merge-endpoint.ts';
@@ -394,6 +395,10 @@ async function tick(config: WorkerConfig, handled: Set<string>): Promise<void> {
     // The operator's configured level governs what the workflow may write. Read-only
     // mode caps it at L2, which can report but not open a pull request.
     autonomy: config.readOnly ? 'L2' : config.autonomy,
+    // Repository code is untrusted. Docker is the boundary; the local runner is
+    // development only and is labelled so in the startup log.
+    sandboxRunner:
+      config.sandbox.runner === 'docker' ? new DockerRunner({ image: config.sandbox.image }) : new LocalProcessRunner(),
   });
 
   // Settle anything a human merged since the last tick. This runs before the health

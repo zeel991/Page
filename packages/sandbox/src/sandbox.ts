@@ -1,9 +1,11 @@
-import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SourceControlProvider } from '@pager/providers';
 import { ProtectedPathError, protectedPathReason } from './patch-policy.js';
+import { LocalProcessRunner, type CommandResult, type SandboxRunner } from './runner.js';
+
+export type { CommandResult } from './runner.js';
 
 /**
  * An isolated working copy.
@@ -16,21 +18,17 @@ import { ProtectedPathError, protectedPathReason } from './patch-policy.js';
  *    the production filesystem are never touched.
  *  - Path arguments are resolved and checked to stay inside the sandbox, so a patch
  *    naming `../../.ssh/config` is refused rather than written.
- *  - Commands run with a scrubbed environment. Credentials in this process — the
- *    Arga key, the model key, GitHub tokens — are removed before the child starts,
- *    so code written by a model and executed here cannot read them.
- *  - Every command has a timeout and an output cap, so a runaway test suite fails
- *    the run instead of hanging the incident.
+ *  - Commands get an allow-listed environment — PATH, and a HOME and TMPDIR inside
+ *    the sandbox — so this process's credentials are not inherited, and tools that
+ *    find `~/.npmrc`, `~/.aws` or `~/.ssh` through HOME find an empty directory.
+ *    On the local runner that is all: the code runs as this user and can still
+ *    open any file this user can by absolute path. Only `DockerRunner` stops that.
+ *  - Every command has a timeout, enforced on its whole process group, and an
+ *    output cap, so a runaway test suite fails the run instead of hanging the
+ *    incident.
+ *  - Where a command runs is a `SandboxRunner`. The default runs on this host and
+ *    is for development only; `DockerRunner` is the production boundary.
  */
-
-export interface CommandResult {
-  command: string;
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  durationMs: number;
-  timedOut: boolean;
-}
 
 export class SandboxPathError extends Error {
   constructor(readonly path: string) {
@@ -39,44 +37,13 @@ export class SandboxPathError extends Error {
   }
 }
 
-/** Environment variables never passed to a sandboxed command. */
-const SECRET_PATTERNS = [
-  /API[_-]?KEY/i,
-  /SECRET/i,
-  /TOKEN/i,
-  /PASSWORD/i,
-  /CREDENTIAL/i,
-  /^ARGA_/i,
-  /^LEMMA_/i,
-  /^ANTHROPIC_/i,
-  /^AWS_/i,
-  /^GH_/i,
-  /^GITHUB_/i,
-  /^DD_/i,
-  /^DATADOG_/i,
-  /^SLACK_/i,
-  /^JIRA_/i,
-  /^LINEAR_/i,
-  /^NOTION_/i,
-  /^DATABASE_URL$/i,
-  /^REDIS_URL$/i,
-];
-
-export function scrubEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
-  const safe: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined) continue;
-    if (SECRET_PATTERNS.some((p) => p.test(key))) continue;
-    safe[key] = value;
-  }
-  return safe;
-}
-
 export interface RunOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
-  /** Extra variables for this command. Merged over the scrubbed base. */
+  /** Extra variables for this command. Merged over the allow-listed base. */
   env?: Record<string, string>;
+  /** Network access for this command. Only a dependency install should ask for it. */
+  network?: boolean;
 }
 
 export interface SandboxOptions {
@@ -84,17 +51,26 @@ export interface SandboxOptions {
   rootDir?: string;
   defaultTimeoutMs?: number;
   maxOutputBytes?: number;
+  /** Where commands run. Defaults to `LocalProcessRunner`, which is for development only. */
+  runner?: SandboxRunner;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT = 1_000_000;
 
 export class Sandbox {
+  readonly runner: SandboxRunner;
+
   private constructor(
+    /** Everything this sandbox owns: `work/` (the repository), `home/`, `tmp/`. */
+    readonly root: string,
+    /** The repository working copy. */
     readonly dir: string,
     readonly revision: string,
     private readonly opts: SandboxOptions,
-  ) {}
+  ) {
+    this.runner = opts.runner ?? new LocalProcessRunner();
+  }
 
   /**
    * Materialise a repository at an exact revision.
@@ -111,8 +87,11 @@ export class Sandbox {
   ): Promise<Sandbox> {
     const parent = opts.rootDir ?? tmpdir();
     await mkdir(parent, { recursive: true });
-    const dir = await mkdtemp(join(parent, 'pager-sandbox-'));
-    const sandbox = new Sandbox(dir, revision, opts);
+    const root = await mkdtemp(join(parent, 'pager-sandbox-'));
+    // Home and temp are siblings of the working copy, not inside it, so a test
+    // runner discovering files in the repository never finds them.
+    await Promise.all(['work', 'home', 'tmp'].map((d) => mkdir(join(root, d))));
+    const sandbox = new Sandbox(root, join(root, 'work'), revision, opts);
 
     const paths = await provider.listFiles(repo, revision);
     if (paths.length === 0) {
@@ -188,70 +167,20 @@ export class Sandbox {
    * containing shell metacharacters cannot become an injection.
    */
   async run(command: string, args: string[] = [], options: RunOptions = {}): Promise<CommandResult> {
-    const timeoutMs = options.timeoutMs ?? this.opts.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-    const maxOutput = options.maxOutputBytes ?? this.opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
-    const started = Date.now();
-
-    return new Promise<CommandResult>((resolvePromise) => {
-      const child = spawn(command, args, {
-        cwd: this.dir,
-        env: { ...scrubEnvironment(process.env), ...(options.env ?? {}) },
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-      let timedOut = false;
-
-      const capture = (chunk: Buffer, into: 'out' | 'err'): void => {
-        const text = chunk.toString('utf8');
-        if (into === 'out') {
-          if (stdout.length < maxOutput) stdout += text.slice(0, maxOutput - stdout.length);
-        } else if (stderr.length < maxOutput) {
-          stderr += text.slice(0, maxOutput - stderr.length);
-        }
-      };
-
-      child.stdout.on('data', (c: Buffer) => capture(c, 'out'));
-      child.stderr.on('data', (c: Buffer) => capture(c, 'err'));
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGKILL');
-      }, timeoutMs);
-
-      const finish = (exitCode: number): void => {
-        clearTimeout(timer);
-        resolvePromise({
-          command: [command, ...args].join(' '),
-          exitCode,
-          stdout,
-          stderr,
-          durationMs: Date.now() - started,
-          timedOut,
-        });
-      };
-
-      child.on('error', (err) => {
-        clearTimeout(timer);
-        resolvePromise({
-          command: [command, ...args].join(' '),
-          // 127 is the conventional "command not found", and a missing binary must
-          // never look like a passing run.
-          exitCode: 127,
-          stdout,
-          stderr: `${stderr}${err.message}`,
-          durationMs: Date.now() - started,
-          timedOut: false,
-        });
-      });
-
-      child.on('close', (code) => finish(code ?? (timedOut ? 124 : 1)));
+    return this.runner.run({
+      command,
+      args,
+      workDir: this.dir,
+      homeDir: join(this.root, 'home'),
+      tmpDir: join(this.root, 'tmp'),
+      env: options.env ?? {},
+      timeoutMs: options.timeoutMs ?? this.opts.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+      maxOutputBytes: options.maxOutputBytes ?? this.opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT,
+      ...(options.network ? { network: true } : {}),
     });
   }
 
   async dispose(): Promise<void> {
-    await rm(this.dir, { recursive: true, force: true });
+    await rm(this.root, { recursive: true, force: true });
   }
 }

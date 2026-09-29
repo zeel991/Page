@@ -33,6 +33,18 @@ describe('worker configuration', () => {
     expect(loadConfig({ ...BASE, DATADOG_BASE_URL: 'https://api.datadoghq.eu' }).datadog.baseUrl).toBe('https://api.datadoghq.eu');
   });
 
+  it('runs repository code locally by default, and says it is development only', async () => {
+    const { describeConfig } = await import('../src/config.ts');
+    const config = loadConfig(BASE);
+    expect(config.sandbox).toEqual({ runner: 'local' });
+    expect(describeConfig(config)).toMatch(/LOCAL PROCESS — DEVELOPMENT ONLY/);
+  });
+
+  it('selects the docker sandbox, and refuses an unknown runner', () => {
+    expect(loadConfig({ ...BASE, PAGER_SANDBOX_RUNNER: 'docker' }).sandbox).toEqual({ runner: 'docker', image: 'node:22-bookworm-slim' });
+    expect(load({ PAGER_SANDBOX_RUNNER: 'chroot' })).toThrow(/PAGER_SANDBOX_RUNNER/);
+  });
+
   it('refuses an autonomy level too low to report', () => {
     expect(load({ PAGER_AUTONOMY_LEVEL: 'L1' })).toThrow(/at least L2/);
   });

@@ -13,6 +13,7 @@
     "@pager/agents": "workspace:*",
     "@pager/core": "workspace:*",
     "@pager/observability": "workspace:*",
-    "@pager/providers": "workspace:*"
+    "@pager/providers": "workspace:*",
+    "@pager/sandbox": "workspace:*"
   }
 }

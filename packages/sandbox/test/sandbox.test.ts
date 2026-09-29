@@ -6,7 +6,9 @@ import {
   registerViaManifest,
 } from '@pager/providers';
 import { INC_001, LocalTwinServer, seedFromFixture } from '@pager/twin-local';
-import { Sandbox, SandboxPathError, scrubEnvironment } from '../src/sandbox.js';
+import { homedir } from 'node:os';
+import { Sandbox, SandboxPathError } from '../src/sandbox.js';
+import { sandboxEnvironment } from '../src/runner.js';
 import { profileRepository } from '../src/repository-profile.js';
 import { ValidationEngine, parseTestCounts, splitCommand } from '../src/validation.js';
 import { ReproductionAgent, ReproductionError, describeReproduction } from '../src/reproduction.js';
@@ -55,29 +57,61 @@ describe('Sandbox containment', () => {
     await expect(s.readFile('/etc/passwd')).rejects.toThrow(SandboxPathError);
   });
 
-  it('strips credentials from the command environment', () => {
-    // Code written by a model runs in here. It must not be able to read the keys
-    // this process holds.
-    const scrubbed = scrubEnvironment({
+  it('builds the command environment from an allow-list, not a scrub', () => {
+    // Scrubbing by name let HOME and SSH_AUTH_SOCK through. Now nothing is
+    // inherited but PATH.
+    expect(sandboxEnvironment({ path: '/usr/bin', home: '/s/home', tmp: '/s/tmp' })).toEqual({
       PATH: '/usr/bin',
-      HOME: '/home/dev',
-      ARGA_API_KEY: 'arga_sk_secret',
-      ANTHROPIC_API_KEY: 'sk-ant-secret',
-      GITHUB_TOKEN: 'ghs_secret',
-      DATABASE_URL: 'postgres://user:pw@host/db',
-      MY_SERVICE_SECRET: 'x',
+      HOME: '/s/home',
+      TMPDIR: '/s/tmp',
+      CI: '1',
       NODE_ENV: 'test',
     });
-    expect(scrubbed).toEqual({ PATH: '/usr/bin', HOME: '/home/dev', NODE_ENV: 'test' });
   });
 
-  it('does not leak this process credentials into a child', async () => {
+  it('does not leak this process environment or home directory into a child', async () => {
     const s = await makeSandbox();
-    const result = await s.run('node', ['-e', 'console.log(JSON.stringify(process.env))']);
-    const env = JSON.parse(result.stdout) as Record<string, string>;
-    expect(env.ARGA_API_KEY).toBeUndefined();
-    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(env.DATABASE_URL).toBeUndefined();
+    const saved = { ...process.env };
+    process.env.SSH_AUTH_SOCK = '/private/tmp/agent.sock';
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-secret';
+    process.env.MY_UNUSUAL_THING = 'kept-before';
+    try {
+      const result = await s.run('node', ['-e', 'console.log(JSON.stringify(process.env))']);
+      const env = JSON.parse(result.stdout) as Record<string, string>;
+      // macOS adds __CF_USER_TEXT_ENCODING to every process; it is not inherited from us.
+      expect(Object.keys(env).filter((k) => !k.startsWith('__CF_')).sort()).toEqual(['CI', 'HOME', 'NODE_ENV', 'PATH', 'TMPDIR']);
+      expect(env.HOME).not.toBe(homedir());
+      expect(env.HOME!.startsWith(s.root)).toBe(true);
+      // Outside the working copy, so a test runner never discovers it.
+      expect(env.HOME!.startsWith(s.dir)).toBe(false);
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('kills the whole process group on timeout, not just the direct child', async () => {
+    // `pnpm test` starts node, which starts workers. Killing only the first left
+    // the rest running after the incident moved on.
+    const s = await makeSandbox();
+    const result = await s.run(
+      'node',
+      [
+        '-e',
+        "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(c.pid); setInterval(() => {}, 1000);",
+      ],
+      { timeoutMs: 800 },
+    );
+    expect(result.timedOut).toBe(true);
+    const grandchild = Number(result.stdout.trim());
+    expect(grandchild).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(() => process.kill(grandchild, 0)).toThrow();
+  });
+
+  it('keeps output written just before exit', async () => {
+    const s = await makeSandbox();
+    const result = await s.run('node', ['-e', "process.stdout.write('x'.repeat(200000)); process.stdout.write('END')"]);
+    expect(result.stdout.endsWith('END')).toBe(true);
   });
 
   it('reports a missing binary as a failure, never as a pass', async () => {
