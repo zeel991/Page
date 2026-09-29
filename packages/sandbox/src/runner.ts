@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { redactSecrets } from '@pager/core';
 
 /**
  * Where a sandboxed command actually runs.
@@ -156,11 +157,12 @@ export function runProcess(
       settled = true;
       clearTimeout(timer);
       killGroup();
+      // Repository code can print anything it can read, credentials included.
       resolvePromise({
-        command: display,
+        command: redactSecrets(display),
         exitCode,
-        stdout,
-        stderr: `${stderr}${extraErr}`,
+        stdout: redactSecrets(stdout),
+        stderr: redactSecrets(`${stderr}${extraErr}`),
         durationMs: Date.now() - started,
         timedOut,
       });

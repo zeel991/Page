@@ -111,8 +111,10 @@ export interface SourceControlProvider {
       sha?: string;
     },
   ): Promise<PullRequest>;
-  /** Clone URL for the reproduction sandbox. May embed a twin credential. */
+  /** Clone URL for the reproduction sandbox. Never carries a credential. */
   cloneUrl(repo: string): string;
+  /** Environment variables that authenticate `git` for a clone, without a token in the URL or argv. */
+  gitAuthEnvironment(): Promise<Record<string, string>>;
 }
 
 export type MetricName =

@@ -26,6 +26,7 @@ import {
   type TimeRange,
 } from '@pager/providers';
 import { AgentTracer, InMemorySink, lemmaFromEnv } from '@pager/observability';
+import { redactSecrets, registerSecret } from '@pager/core';
 import {
   AnthropicModel,
   IncidentInvestigator,
@@ -42,9 +43,11 @@ import { renderDashboard } from './dashboard.ts';
 import { handleSlackInteraction, type MergeApproval } from './merge-endpoint.ts';
 import { deploymentFromRevision, probeDeployedRevision } from './deployed-revision.ts';
 import { decideRecoveryWindow } from './recovery-window.ts';
+import { statusFor } from './status-view.ts';
 
 const log = (message: string): void => {
-  console.log(`${new Date().toISOString()}  ${message}`);
+  // Everything logged may have come from a vendor error or a command's output.
+  console.log(`${new Date().toISOString()}  ${redactSecrets(message)}`);
 };
 
 /** Record where the agent is. Visible on the dashboard within 15 seconds. */
@@ -61,9 +64,11 @@ const enter = (stage: Stage, detail: string | null = null): void => {
  * from one that has quietly died. This also lets the worker run as an ordinary web
  * service on hosts that only offer those, which is why it binds a port at all.
  *
- * Nothing here is a credential and nothing here is a control: the endpoint is
- * strictly read-only, so exposing it cannot cause an incident to be opened,
- * a branch to be created or a message to be sent.
+ * Nothing here is a control: the endpoint is strictly read-only, so exposing it
+ * cannot cause an incident to be opened, a branch to be created or a message to be
+ * sent. It is not authenticated yet, so a remote reader gets a view without
+ * approver names or raw vendor errors (see status-view.ts), and credentials are
+ * redacted from every view.
  */
 /**
  * One incident, recorded in enough detail to be reviewed after the fact.
@@ -211,14 +216,16 @@ function serveStatus(port: number, config: WorkerConfig, sourceControl: SourceCo
       response.end(JSON.stringify({ status: 'ok', service: 'pager-developer-worker' }));
       return;
     }
+    const view = () =>
+      statusFor(status, { remoteAddress: request.socket.remoteAddress, publicStatus: config.publicStatus });
     if (path === '/status') {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify(status, null, 2));
+      response.end(JSON.stringify(view(), null, 2));
       return;
     }
     if (path === '/') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      response.end(renderDashboard(status));
+      response.end(redactSecrets(renderDashboard(view())));
       return;
     }
     response.writeHead(404, { 'content-type': 'application/json' });
@@ -630,6 +637,11 @@ async function tick(config: WorkerConfig, handled: Set<string>): Promise<void> {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  // Every credential this process holds is redacted wherever it later appears.
+  for (const secret of [
+    config.githubToken, config.slackToken, config.anthropicKey, config.datadog.apiKey, config.datadog.appKey,
+    config.slackSigningSecret, config.notion?.token, config.email?.apiKey,
+  ]) registerSecret(secret);
   log(`Pager Developer worker starting\n  ${describeConfig(config)}`);
   status.config = {
     service: config.service,

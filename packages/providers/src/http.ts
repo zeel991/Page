@@ -1,3 +1,16 @@
+import { redactSecrets, registerSecret } from '@pager/core';
+
+/** Headers whose values are credentials, registered for redaction as they are sent. */
+const CREDENTIAL_HEADER = /authorization|api[-_]?key|application[-_]?key|token|secret/i;
+
+function registerCredentials(headers: Record<string, string>): void {
+  for (const [name, value] of Object.entries(headers)) {
+    if (!CREDENTIAL_HEADER.test(name)) continue;
+    registerSecret(value);
+    registerSecret(value.replace(/^(bearer|basic|token)\s+/i, ''));
+  }
+}
+
 /**
  * Minimal HTTP client shared by every provider adapter.
  *
@@ -61,8 +74,11 @@ export class ProviderHttpError extends Error {
     readonly url: string,
     readonly body: string,
   ) {
-    super(`${method} ${url} failed with ${status}: ${truncate(body, 300)}`);
+    // A vendor error can echo what it was sent, and this message is logged and
+    // shown. Credentials never survive into it.
+    super(redactSecrets(`${method} ${url} failed with ${status}: ${truncate(body, 300)}`));
     this.name = 'ProviderHttpError';
+    this.body = redactSecrets(body);
   }
 
   /**
@@ -91,6 +107,7 @@ export class Http {
   constructor(opts: HttpOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
     this.headers = opts.headers ?? {};
+    registerCredentials(this.headers);
     this.dynamicHeaders = opts.dynamicHeaders ?? null;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
     this.timeoutMs = opts.timeoutMs ?? 30_000;
@@ -176,6 +193,7 @@ export class Http {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const resolved = this.dynamicHeaders ? await this.dynamicHeaders() : {};
+    registerCredentials(resolved);
     try {
       const res = await this.fetchImpl(url, {
         method,

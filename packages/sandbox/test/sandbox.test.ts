@@ -108,6 +108,13 @@ describe('Sandbox containment', () => {
     expect(() => process.kill(grandchild, 0)).toThrow();
   });
 
+  it('redacts credentials from captured output', async () => {
+    const s = await makeSandbox();
+    const result = await s.run('node', ['-e', "console.log('leaked ghs_abcdefghijklmnopqrstuvwxyz0123'); console.error('https://x:pw123456@host/r.git')"]);
+    expect(result.stdout).not.toContain('ghs_abcdef');
+    expect(result.stderr).not.toContain('pw123456');
+  });
+
   it('keeps output written just before exit', async () => {
     const s = await makeSandbox();
     const result = await s.run('node', ['-e', "process.stdout.write('x'.repeat(200000)); process.stdout.write('END')"]);

@@ -71,9 +71,12 @@ describe('provider registry', () => {
       config: config({ credentials: { githubToken: 'REAL-PRODUCTION-TOKEN' } }),
       twinRun: run,
     });
-    const cloneUrl = providers.sourceControl.cloneUrl('acme/api');
-    expect(cloneUrl).toContain('twin-gh');
-    expect(cloneUrl).not.toContain('REAL-PRODUCTION-TOKEN');
+    // The twin's own credential is the one git would present.
+    const header = (await providers.sourceControl.gitAuthEnvironment()).GIT_CONFIG_VALUE_0 ?? '';
+    expect(Buffer.from(header.replace('Authorization: Basic ', ''), 'base64').toString()).toBe('x-access-token:twin-gh');
+    const gitEnv = JSON.stringify(await providers.sourceControl.gitAuthEnvironment());
+    expect(gitEnv).not.toContain(Buffer.from('x-access-token:REAL-PRODUCTION-TOKEN').toString('base64'));
+    expect(gitEnv).not.toContain('REAL-PRODUCTION-TOKEN');
   });
 
   it('refuses a real backend with no credential rather than calling unauthenticated', () => {

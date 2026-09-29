@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Lemma, type TraceContext } from '@uselemma/tracing';
+import { redactSecrets } from '@pager/core';
 import type { AgentRunRecord, TelemetrySink, ToolCallRecord } from './types.js';
 
 /**
@@ -220,9 +221,9 @@ export class AgentTracer {
   }
 }
 
+/** An error as recorded: the message, with any credential it carries redacted. */
 export function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+  return redactSecrets(err instanceof Error ? err.message : String(err));
 }
 
 /** Build a Lemma client from the environment, or null when not configured. */

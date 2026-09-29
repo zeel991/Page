@@ -150,13 +150,36 @@ describe('GitHubProvider', () => {
     );
   });
 
-  it('derives a git clone url from the api base url', async () => {
+  // The token used to be embedded as x-access-token:…@ in the URL, which git
+  // writes to .git/config and echoes in its errors.
+  it('derives a git clone url from the api base url, with no credential in it', async () => {
     const { fetchImpl } = stubFetch([]);
-    const twin = new GitHubProvider({ baseUrl: 'https://pub-r1--github.arga.test', token: 'tok', fetchImpl });
-    expect(twin.cloneUrl('acme/checkout-api')).toBe('https://x-access-token:tok@pub-r1--github.arga.test/acme/checkout-api.git');
+    const twin = new GitHubProvider({ baseUrl: 'https://pub-r1--github.arga.test', token: 'ghs_tokentokentokentoken1234', fetchImpl });
+    expect(twin.cloneUrl('acme/checkout-api')).toBe('https://pub-r1--github.arga.test/acme/checkout-api.git');
 
-    const real = new GitHubProvider({ baseUrl: 'https://api.github.com', token: 'tok', fetchImpl });
-    expect(real.cloneUrl('acme/checkout-api')).toBe('https://x-access-token:tok@github.com/acme/checkout-api.git');
+    const real = new GitHubProvider({ baseUrl: 'https://api.github.com', token: 'ghs_tokentokentokentoken1234', fetchImpl });
+    expect(real.cloneUrl('acme/checkout-api')).toBe('https://github.com/acme/checkout-api.git');
+  });
+
+  it('authenticates git through an extra header in the environment, not argv or the URL', async () => {
+    const { fetchImpl } = stubFetch([]);
+    const gh = new GitHubProvider({ baseUrl: 'https://api.github.com', token: 'ghs_tokentokentokentoken1234', fetchImpl });
+    const env = await gh.gitAuthEnvironment();
+    expect(env).toMatchObject({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.extraHeader', GIT_TERMINAL_PROMPT: '0' });
+    expect(env.GIT_CONFIG_VALUE_0).toBe(
+      `Authorization: Basic ${Buffer.from('x-access-token:ghs_tokentokentokentoken1234').toString('base64')}`,
+    );
+  });
+
+  it('never lets a credential survive into an error message', async () => {
+    // A vendor echoing the request is enough to put the token in a log line.
+    const token = 'ghs_echoedechoedechoedechoed99';
+    const { fetchImpl } = stubFetch([() => ({ status: 400, body: { message: `bad credentials: Bearer ${token}` } })]);
+    const gh = new GitHubProvider({ baseUrl: 'https://api.github.com', token, fetchImpl });
+    const err = await gh.getCommit('acme/checkout-api', 'abc').catch((e: unknown) => e as ProviderHttpError);
+    expect(err.message).not.toContain(token);
+    expect(err.body).not.toContain(token);
+    expect(err.message).toMatch(/REDACTED/);
   });
 });
 

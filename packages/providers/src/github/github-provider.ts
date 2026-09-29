@@ -1,4 +1,4 @@
-import type { ChangedFile, Commit } from '@pager/core';
+import { registerSecret, type ChangedFile, type Commit } from '@pager/core';
 import { Http, ProviderHttpError } from '../http.js';
 import type {
   Branch,
@@ -173,19 +173,32 @@ export class GitHubProvider implements SourceControlProvider {
     });
   }
 
-  /** Current credential, for the sandbox clone URL. Never logged. */
+  /** Current credential. Never logged, never put in a URL. */
   private async currentToken(): Promise<string | undefined> {
     if (this.tokenProvider) return this.tokenProvider();
     return this.token;
   }
 
-  /** Clone URL carrying a freshly resolved credential. */
-  async authenticatedCloneUrl(repo: string): Promise<string> {
+  /**
+   * Environment that authenticates `git` to this host, for a clone or fetch.
+   *
+   * The credential travels as an `http.extraHeader` set through git's
+   * GIT_CONFIG_* variables: never in the URL, so it cannot land in `.git/config`,
+   * in a remote listing or in an error that echoes the URL; and never in argv, so
+   * it is not visible in the process table. Requires git 2.31 or later.
+   */
+  async gitAuthEnvironment(): Promise<Record<string, string>> {
     const token = await this.currentToken();
-    const url = new URL(this.baseUrl);
-    const host = url.host.startsWith('api.') ? url.host.slice(4) : url.host;
-    const auth = token ? `x-access-token:${encodeURIComponent(token)}@` : '';
-    return `${url.protocol}//${auth}${host}/${repo}.git`;
+    const base = { GIT_TERMINAL_PROMPT: '0' };
+    if (!token) return base;
+    registerSecret(token);
+    const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
+    return {
+      ...base,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.extraHeader',
+      GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`,
+    };
   }
 
   async getCommit(repo: string, sha: string): Promise<Commit> {
@@ -471,17 +484,15 @@ export class GitHubProvider implements SourceControlProvider {
   /**
    * Clone URL for the reproduction sandbox.
    *
-   * Derived from the API base URL so a twin clones from the twin. The token is
-   * embedded because the sandbox clones over HTTPS; it is credential material and
-   * must never be logged — callers log `repo`, not this.
+   * Derived from the API base URL so a twin clones from the twin. It carries no
+   * credential: that is supplied by `gitAuthEnvironment`, because a token in a URL
+   * is written into `.git/config` and echoed by every git error that prints it.
    */
   cloneUrl(repo: string): string {
     const url = new URL(this.baseUrl);
     // api.github.com/repos/... is served from github.com for git operations.
     const host = url.host.startsWith('api.') ? url.host.slice(4) : url.host;
-    // GitHub accepts installation tokens only with the x-access-token username.
-    const auth = this.token ? `x-access-token:${encodeURIComponent(this.token)}@` : '';
-    return `${url.protocol}//${auth}${host}/${repoPath(repo)}.git`;
+    return `${url.protocol}//${host}/${repoPath(repo)}.git`;
   }
 }
 
