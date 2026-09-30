@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 4100",
-    "build": "next build",
+    "build": "pnpm --filter \"@pager/web^...\" build && next build",
     "start": "next start -p 4100",
     "typecheck": "tsc --noEmit"
   },
