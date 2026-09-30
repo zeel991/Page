@@ -7,6 +7,7 @@ import { Reveal } from '@/components/motion/reveal';
 import { ScrambleText } from '@/components/motion/scramble-text';
 import { ShapeGrid } from '@/components/motion/shape-grid';
 import { Barcode, CircleLink, Marquee, SectionLabel, Wordmark } from '@/components/site/primitives';
+import { SiteFooter } from '@/components/site/doc-page';
 
 /*
  * The public face of the project.
@@ -26,6 +27,7 @@ const LINKS = {
 };
 
 const NAV = [
+  ['Pricing', '/pricing'],
   ['Guarantees', '#guarantees'],
   ['Numbers', '#numbers'],
   ['The loop', '#loop'],
@@ -471,7 +473,7 @@ export default function LandingPage() {
 
           <footer className="flex flex-wrap items-center justify-between gap-4 border-t border-paper/20 py-6 text-[12px] text-paper/60">
             <Wordmark className="text-paper" />
-            <span>7 packages · 3 apps · 664 tests</span>
+            <SiteFooter tone="dark" />
             <a href="#top" className="hover:text-paper">Back to top ↑</a>
           </footer>
         </div>

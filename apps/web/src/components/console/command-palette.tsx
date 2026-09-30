@@ -15,7 +15,7 @@ interface Command {
 const COMMANDS: Command[] = [
   ...CONSOLE_NAV.map(([label, href]) => ({ label, hint: 'Go to', href })),
   { label: 'Landing page', hint: 'Go to', href: '/' },
-  { label: 'Live worker dashboard', hint: 'Open', href: 'https://pager-developer-worker.onrender.com', external: true },
+  { label: 'Plan and billing', hint: 'Go to', href: '/settings#billing' },
   { label: 'Demo video', hint: 'Open', href: 'https://youtu.be/2Bos0VkR3jg', external: true },
 ];
 
