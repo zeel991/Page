@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { JobQueue, RevisionRunRepository, ServiceConfigRepository, type JobRow, type RevisionRunRow } from '@pager/db';
 import {
   BudgetExceededError,
@@ -58,8 +59,11 @@ const MERGE_POLL_MS = 60_000;
 
 const now = (c: JobContext) => (c.op.now ?? (() => new Date()))();
 
-function incidentKeyFor(revision: string): string {
-  return `INC-${revision.slice(0, 12).toUpperCase()}`;
+/** One key per failure per revision. Runs from before failures were keyed ('') keep the revision's own. */
+function incidentKeyFor(revision: string, failureKey = ''): string {
+  const base = `INC-${revision.slice(0, 12).toUpperCase()}`;
+  if (!failureKey) return base;
+  return `${base}-${createHash('sha256').update(failureKey).digest('hex').slice(0, 4).toUpperCase()}`;
 }
 
 function workflowFor(c: JobContext, tenant: Tenant, incidentId: () => string | null = () => null): IncidentWorkflow {
@@ -137,11 +141,6 @@ async function poll(c: JobContext, job: JobRow): Promise<JobOutcome> {
   }
 
   const runs = new RevisionRunRepository(c.op.db);
-  const existing = await runs.find(tenant.service.id, probe.sha);
-  if (existing) {
-    await record(`watching ${probe.sha.slice(0, 12)} — already handled (${existing.phase})`);
-    return { kind: 'reschedule', at: next };
-  }
 
   const watcher = new ProductionWatcher(tenant.observability, tenant.knowledge);
   const alert = await tenant.tracer.run('ProductionWatcher', { input: { service: tenant.service.name } }, (ctx) =>
@@ -156,32 +155,44 @@ async function poll(c: JobContext, job: JobRow): Promise<JobOutcome> {
     return { kind: 'reschedule', at: next };
   }
 
-  // The plan's monthly incident allowance. Checked before anything is recorded, so a
-  // later poll opens the incident once the month turns or the plan changes.
-  const plans = new PlanRepository(c.op.db);
-  const plan = await plans.forOrganization(tenant.service.organizationId);
-  const used = await plans.incidentsThisMonth(tenant.service.organizationId, now(c));
-  if (used >= plan.maxIncidentsPerMonth) {
-    await record(`NOT INVESTIGATING: an incident is live, but the ${plan.name} plan's ${plan.maxIncidentsPerMonth} incidents this month are used`);
+  // One incident per distinct novel failure on this revision, each recorded durably
+  // before anything is done about it. A monitor stays red for as long as the bug is
+  // live; the key is what stops every poll from opening another pull request for it.
+  const handled = new Map((await runs.forRevision(tenant.service.id, probe.sha)).map((r) => [r.failureKey, r]));
+  const novel = alert.failures.filter((f) => f.novelty.novel);
+  // A run from before failures were keyed (key '') was about the loudest novel one.
+  const fresh = novel.filter((f, i) => !handled.has(f.key) && !(i === 0 && handled.has('')));
+  if (fresh.length === 0) {
+    await record(`watching ${probe.sha.slice(0, 12)} — ${novel.length} failure(s), all already handled (${[...handled.values()].map((r) => r.phase).join(', ')})`);
     return { kind: 'reschedule', at: next };
   }
 
-  // One incident per deployed revision, recorded durably before anything is done
-  // about it. A monitor stays red for as long as the bug is live; this is what stops
-  // every poll from opening another pull request.
-  const { run, created } = await runs.begin(tenant.service.organizationId, tenant.service.id, probe.sha);
-  if (created) {
-    await c.queue.enqueue({
-      organizationId: tenant.service.organizationId,
-      serviceId: tenant.service.id,
-      kind: 'run_incident',
-      payload: { runId: run.id, revision: probe.sha },
-      dedupeKey: `run_incident:${run.id}`,
-      // An incident run is long and expensive; retry it once, not endlessly.
-      maxAttempts: 2,
-    });
+  const plans = new PlanRepository(c.op.db);
+  const plan = await plans.forOrganization(tenant.service.organizationId);
+  const opened: string[] = [];
+  for (const failure of fresh) {
+    // The plan's monthly incident allowance, checked before anything is recorded, so
+    // a later poll opens the incident once the month turns or the plan changes.
+    const used = await plans.incidentsThisMonth(tenant.service.organizationId, now(c));
+    if (used >= plan.maxIncidentsPerMonth) {
+      await record(`NOT INVESTIGATING: an incident is live, but the ${plan.name} plan's ${plan.maxIncidentsPerMonth} incidents this month are used`);
+      return { kind: 'reschedule', at: next };
+    }
+    const { run, created } = await runs.begin(tenant.service.organizationId, tenant.service.id, probe.sha, failure.key);
+    if (created) {
+      await c.queue.enqueue({
+        organizationId: tenant.service.organizationId,
+        serviceId: tenant.service.id,
+        kind: 'run_incident',
+        payload: { runId: run.id, revision: probe.sha, failureKey: failure.key },
+        dedupeKey: `run_incident:${run.id}`,
+        // An incident run is long and expensive; retry it once, not endlessly.
+        maxAttempts: 2,
+      });
+    }
+    opened.push(`${failure.cluster.errorType ?? 'error'} ×${failure.cluster.count} at ${failure.key}`);
   }
-  await record(`incident opened for ${probe.sha.slice(0, 12)}: ${alert.primary?.errorType ?? 'error'} ×${alert.primary?.count ?? 0}`);
+  await record(`incident(s) opened for ${probe.sha.slice(0, 12)}: ${opened.join('; ')}`);
   return { kind: 'reschedule', at: next };
 }
 
@@ -210,7 +221,7 @@ async function runIncident(c: JobContext, job: JobRow): Promise<JobOutcome> {
       : {}),
   };
 
-  const incidentKey = run.incidentKey ?? incidentKeyFor(run.deployedRevision);
+  const incidentKey = run.incidentKey ?? incidentKeyFor(run.deployedRevision, run.failureKey);
   let currentIncident: string | null = run.incidentId;
   let result: Awaited<ReturnType<IncidentWorkflow['run']>>;
   try {
@@ -221,6 +232,7 @@ async function runIncident(c: JobContext, job: JobRow): Promise<JobOutcome> {
       slackChannel: tenant.service.slackChannelId!,
       deployment,
       incidentKey,
+      ...(run.failureKey ? { failureKey: run.failureKey } : {}),
       ...(tenant.emailRecipients.length ? { teamEmails: tenant.emailRecipients } : {}),
       resume,
       onCheckpoint: async (cp) => {
@@ -356,7 +368,7 @@ async function verifyRecovery(c: JobContext, job: JobRow): Promise<JobOutcome> {
     slackChannel: tenant.service.slackChannelId!,
     deployedRevision: run.deployedRevision,
     pullRequestNumber: pr.number,
-    incidentKey: run.incidentKey ?? incidentKeyFor(run.deployedRevision),
+    incidentKey: run.incidentKey ?? incidentKeyFor(run.deployedRevision, run.failureKey),
     incidentId: run.incidentId,
     slackThread: { id: run.slackThreadTs!, channel: run.slackChannel! },
     issueKey: run.issueKey,

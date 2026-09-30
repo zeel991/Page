@@ -150,7 +150,10 @@ describe('multi-tenant worker', () => {
     for (let i = 0; i < 200 && !dead; i++) await new Promise((r) => setTimeout(r, 50));
     expect(dead).toBe(true);
     const [partial] = await h.handle.db.select().from(revisionRuns);
-    expect(partial).toMatchObject({ phase: 'running', branch: `pager/inc-${deployed.slice(0, 12)}` });
+    // One run per distinct failure on the revision; its branch is named for it.
+    expect(partial).toMatchObject({ phase: 'running', failureKey: '/app/src/checkout/service.ts:20' });
+    expect(partial!.branch).toBe(`pager/${partial!.incidentKey!.toLowerCase()}`);
+    expect(partial!.incidentKey).toMatch(new RegExp(`^INC-${deployed.slice(0, 12).toUpperCase()}-[0-9A-F]{4}$`));
     expect(partial!.incidentId).not.toBeNull();
     expect(partial!.pullRequestNumber).toBeNull();
 

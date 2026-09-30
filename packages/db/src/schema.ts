@@ -605,6 +605,11 @@ export const revisionRuns = pgTable('revision_runs', {
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
   serviceId: uuid('service_id').notNull().references(() => services.id, { onDelete: 'cascade' }),
   deployedRevision: text('deployed_revision').notNull(),
+  /**
+   * Which distinct failure on this revision the run is about (the watcher's root
+   * frame key). '' for runs from before a revision could carry several.
+   */
+  failureKey: text('failure_key').notNull().default(''),
   /** 'running' | 'not_escalated' | 'halted' | 'awaiting_merge' | 'verifying' | 'settled' | 'closed_unmerged' */
   phase: text('phase').notNull().default('running'),
   incidentId: uuid('incident_id').references(() => incidents.id, { onDelete: 'set null' }),
@@ -631,7 +636,7 @@ export const revisionRuns = pgTable('revision_runs', {
   outputTokens: bigint('output_tokens', { mode: 'number' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [uniqueIndex('revision_runs_service_revision_idx').on(t.serviceId, t.deployedRevision)]);
+}, (t) => [uniqueIndex('revision_runs_service_revision_failure_idx').on(t.serviceId, t.deployedRevision, t.failureKey)]);
 
 /**
  * One model call's usage and cost. Tokens come from the provider's response; cost is

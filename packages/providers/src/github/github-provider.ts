@@ -471,6 +471,12 @@ export class GitHubProvider implements SourceControlProvider {
     return res ? { name: res.ref.replace(/^refs\/heads\//, ''), sha: res.object.sha } : null;
   }
 
+  async getDefaultBranch(repo: string): Promise<string> {
+    const res = await this.http.get<{ default_branch?: string }>(`/repos/${repoPath(repo)}`);
+    if (!res.default_branch) throw new Error(`GitHub did not report a default branch for ${repo}`);
+    return res.default_branch;
+  }
+
   async createPullRequest(repo: string, input: CreatePullRequestInput): Promise<PullRequest> {
     const res = await this.http.post<GhPullRequest>(`/repos/${repoPath(repo)}/pulls`, {
       title: input.title,

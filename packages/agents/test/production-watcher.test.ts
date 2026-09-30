@@ -34,12 +34,18 @@ const tracer = () => {
 };
 
 describe('extractKnownFailureModes', () => {
-  it('picks up error type names a runbook mentions', () => {
+  it('picks up an error type with where and how it fails', () => {
     const modes = extractKnownFailureModes([
-      { title: 'Runbook', content: '- PaymentGatewayError means the upstream is down.' },
+      { title: 'Runbook', content: '- Gateway 503s surface as PaymentGatewayError with frames inside @acme/payments-sdk.' },
     ]);
-    expect(modes).toHaveLength(1);
-    expect(modes[0]).toMatchObject({ marker: 'PaymentGatewayError', source: 'Runbook' });
+    expect(modes).toEqual([
+      expect.objectContaining({ errorType: 'PaymentGatewayError', locations: ['@acme/payments-sdk'], messages: ['503'], source: 'Runbook' }),
+    ]);
+  });
+
+  it('keeps a type-only mention with nothing to match on', () => {
+    const [mode] = extractKnownFailureModes([{ title: 'R', content: '- PaymentGatewayError means the upstream is down.' }]);
+    expect(mode).toMatchObject({ errorType: 'PaymentGatewayError', locations: [], messages: [] });
   });
 
   it('does not register a failure mode from prose alone', () => {
@@ -86,7 +92,7 @@ describe('ProductionWatcher', () => {
 
     expect(alert!.primary!.errorType).toBe('PaymentGatewayError');
     expect(alert!.escalate).toBe(false);
-    expect(alert!.novelty!.matched!.marker).toBe('PaymentGatewayError');
+    expect(alert!.novelty!.matched!.errorType).toBe('PaymentGatewayError');
     expect(alert!.rationale).toMatch(/Handle via its runbook/);
   });
 
@@ -182,5 +188,51 @@ describe('evidence window', () => {
       watcher().check(ctx, 'checkout-api', { now: () => now, lookbackMinutes: 15 }),
     );
     expect(alert!.logWindow.from.getTime()).toBeLessThan(alert!.firedAt.getTime());
+  });
+});
+
+describe('ProductionWatcher with several distinct failures', () => {
+  const at = new Date('2026-09-13T15:00:00Z');
+  const entry = (message: string, frame: string) => ({
+    at,
+    service: 'svc',
+    level: 'error' as const,
+    message,
+    stackTrace: `${message}\n    at handler (${frame})\n    at node:internal/process/task_queues:95:5`,
+    attributes: {},
+  });
+  const observability = (logs: ReturnType<typeof entry>[]) =>
+    ({
+      kind: 'observability',
+      listMonitors: async () => [{ id: 'm1', name: 'svc errors', status: 'ALERT', transitionedAt: at, query: '', message: '' }],
+      queryLogs: async () => Object.assign(logs, { truncated: false }),
+    }) as unknown as ConstructorParameters<typeof ProductionWatcher>[0];
+
+  it('reports one failure per root frame, loudest first, each assessed for novelty', async () => {
+    const logs = [
+      ...Array(5).fill(0).map(() => entry("TypeError: Cannot read properties of undefined (reading 'total')", '/app/src/cart.ts:12:5')),
+      // A different message from the same line: a different signature, the same bug.
+      ...Array(2).fill(0).map(() => entry('TypeError: cart.lines is not iterable', '/app/src/cart.ts:12:5')),
+      ...Array(3).fill(0).map(() => entry('RangeError: Invalid time value', '/app/src/invoice.ts:40:9')),
+    ];
+    const { tracer: t } = tracer();
+    const alert = await t.run('ProductionWatcher', {}, (ctx) => new ProductionWatcher(observability(logs)).check(ctx, 'svc', { now: () => at }));
+    // The old watcher looked only at the loudest cluster and missed the RangeError.
+    expect(alert!.failures.map((f) => [f.key, f.cluster.errorType, f.novelty.novel])).toEqual([
+      ['/app/src/cart.ts:12', 'TypeError', true],
+      ['/app/src/invoice.ts:40', 'RangeError', true],
+    ]);
+    expect(alert!.clusters).toHaveLength(3);
+    expect(alert!.escalate).toBe(true);
+    expect(alert!.rationale).toMatch(/1 other distinct failure/);
+  });
+
+  it('caps the failures it reports', async () => {
+    const logs = [1, 2, 3, 4, 5].map((n) => entry(`Error: e${n}`, `/app/src/f${n}.ts:${n}:1`));
+    const { tracer: t } = tracer();
+    const alert = await t.run('ProductionWatcher', {}, (ctx) =>
+      new ProductionWatcher(observability(logs)).check(ctx, 'svc', { now: () => at, maxFailures: 2 }),
+    );
+    expect(alert!.failures).toHaveLength(2);
   });
 });

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
 import { devNull, tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -59,6 +59,7 @@ export interface SandboxOptions {
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT = 1_000_000;
 const CLONE_TIMEOUT_MS = 180_000;
+const SKIPPED_DIRS = new Set(['.git', 'node_modules', '.venv', 'venv', '__pycache__', '.pytest_cache']);
 
 export class Sandbox {
   readonly runner: SandboxRunner;
@@ -188,6 +189,36 @@ export class Sandbox {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw err;
     }
+  }
+
+  /** Names in a repository directory, or [] when it does not exist. */
+  async listDir(path: string): Promise<string[]> {
+    try {
+      return (await readdir(this.safePath(path), { withFileTypes: true })).map((d) => (d.isDirectory() ? `${d.name}/` : d.name));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') return [];
+      throw err;
+    }
+  }
+
+  /**
+   * Every file in the working copy, repository-relative. Installed dependencies and
+   * git's own metadata are not the repository's files and are skipped.
+   */
+  async listFiles(): Promise<string[]> {
+    const out: string[] = [];
+    const walk = async (rel: string): Promise<void> => {
+      for (const entry of await readdir(rel ? join(this.dir, rel) : this.dir, { withFileTypes: true })) {
+        const path = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          if (!SKIPPED_DIRS.has(entry.name)) await walk(path);
+        } else if (entry.isFile()) {
+          out.push(path);
+        }
+      }
+    };
+    await walk('');
+    return out.sort();
   }
 
   async deleteFile(path: string): Promise<void> {

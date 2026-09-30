@@ -211,25 +211,44 @@ export class JobQueue {
 export class RevisionRunRepository {
   constructor(private readonly db: Database) {}
 
-  /** The run for this revision, created if new. `created` says which. */
-  async begin(organizationId: string, serviceId: string, deployedRevision: string): Promise<{ run: RevisionRunRow; created: boolean }> {
+  /** The run for this failure on this revision, created if new. `created` says which. */
+  async begin(
+    organizationId: string,
+    serviceId: string,
+    deployedRevision: string,
+    failureKey = '',
+  ): Promise<{ run: RevisionRunRow; created: boolean }> {
     const [inserted] = await this.db
       .insert(revisionRuns)
-      .values({ organizationId, serviceId, deployedRevision })
+      .values({ organizationId, serviceId, deployedRevision, failureKey })
       .onConflictDoNothing()
       .returning();
     if (inserted) return { run: inserted, created: true };
-    const existing = await this.find(serviceId, deployedRevision);
+    const existing = await this.find(serviceId, deployedRevision, failureKey);
     return { run: existing!, created: false };
   }
 
-  async find(serviceId: string, deployedRevision: string): Promise<RevisionRunRow | null> {
+  async find(serviceId: string, deployedRevision: string, failureKey = ''): Promise<RevisionRunRow | null> {
     const [row] = await this.db
       .select()
       .from(revisionRuns)
-      .where(and(eq(revisionRuns.serviceId, serviceId), eq(revisionRuns.deployedRevision, deployedRevision)))
+      .where(
+        and(
+          eq(revisionRuns.serviceId, serviceId),
+          eq(revisionRuns.deployedRevision, deployedRevision),
+          eq(revisionRuns.failureKey, failureKey),
+        ),
+      )
       .limit(1);
     return row ?? null;
+  }
+
+  /** Every run for a revision, one per distinct failure. */
+  async forRevision(serviceId: string, deployedRevision: string): Promise<RevisionRunRow[]> {
+    return this.db
+      .select()
+      .from(revisionRuns)
+      .where(and(eq(revisionRuns.serviceId, serviceId), eq(revisionRuns.deployedRevision, deployedRevision)));
   }
 
   async get(id: string): Promise<RevisionRunRow | null> {

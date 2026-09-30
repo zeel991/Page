@@ -16,6 +16,7 @@ import { INC_001, INC_009, INC_011, LocalTwinServer, seedFromFixture } from '@pa
 import {
   IncidentWorkflow,
   TELEMETRY_WINDOW_MINUTES,
+  isTestFile,
   pullRequestTitle,
   telemetryWindowsFor,
 } from '../src/workflow.js';
@@ -121,6 +122,33 @@ const input = {
 
 afterEach(async () => {
   await server?.stop();
+});
+
+describe('repositories that are not the demo', () => {
+  it('recognises test files by the runners’ conventions, not by a list of names', () => {
+    for (const path of ['src/cart/pricing.test.ts', 'lib/api.spec.js', 'tests/test_orders.py', 'app/orders_test.py', '__tests__/cart.jsx', 'test/integration/checkout.mjs']) {
+      expect(isTestFile(path), path).toBe(true);
+    }
+    for (const path of ['src/checkout/service.ts', 'test/fixtures/order.json', 'test/helpers/build.ts', 'src/testing.ts']) {
+      expect(isTestFile(path), path).toBe(false);
+    }
+  });
+
+  it('opens the pull request against the repository’s own default branch, not an assumed main', async () => {
+    const trunk = (b: string | undefined) => (b === 'main' ? 'trunk' : b);
+    const fixture = {
+      ...INC_001,
+      defaultBranch: 'trunk',
+      commits: INC_001.commits.map((c) => ({ ...c, ...(c.branch ? { branch: trunk(c.branch)! } : {}) })),
+      pullRequests: (INC_001.pullRequests ?? []).map((p) => ({ ...p, baseRef: trunk(p.baseRef)! })),
+    };
+    const { workflow, deployment } = await build(fixture, 'scripted');
+    const result = await workflow.run({ ...input, deployment });
+    expect(result.haltReason).toBeNull();
+    const repo = server.current.repositories.get('acme/checkout-api')!;
+    expect([...repo.branches.keys()]).not.toContain('main');
+    expect(repo.pullRequests.find((p) => p.number === result.pullRequest!.number)!.baseRef).toBe('trunk');
+  });
 });
 
 describe('IncidentWorkflow', () => {

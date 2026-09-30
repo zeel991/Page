@@ -30,7 +30,7 @@ import {
   type ValidationRun,
 } from '@pager/sandbox';
 import { ProductionWatcher, describeAlert, type ProductionAlert } from './production-watcher.js';
-import { firstSentences, toRepositoryPath } from './log-analysis.js';
+import { firstSentences, locateInRepository, toRepositoryPath } from './log-analysis.js';
 import {
   NoPatchGenerator,
   type PatchContext,
@@ -189,6 +189,11 @@ function writeTool(name: string, description: string): ToolDefinition {
 }
 
 export interface WorkflowInput {
+  /**
+   * Which of the alert's distinct failures this run is about (`DetectedFailure.key`).
+   * Absent: the loudest novel one. Each novel failure is its own incident.
+   */
+  failureKey?: string;
   service: string;
   repository: string;
   /** Branch pull requests target. NOT the source of the sandbox revision. */
@@ -297,6 +302,14 @@ export function resolveDeployedRevision(input: WorkflowInput): DeployedRevision 
     };
   }
   return null;
+}
+
+/** A test file, by the conventions of the common runners (node:test, vitest, jest, mocha, pytest). */
+export function isTestFile(path: string): boolean {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(name)) return true;
+  if (/^test_.+\.py$/.test(name) || /_test\.py$/.test(name)) return true;
+  return /(^|\/)(test|tests|__tests__)\//.test(path) && /\.([cm]?[jt]sx?|py)$/.test(name) && !/(^|\/)(fixtures?|helpers?)\//.test(path);
 }
 
 /** The readable half of an unknown thrown value. */
@@ -458,6 +471,22 @@ export class IncidentWorkflow {
       step('watching', `No monitor alerting for ${input.service}. Production looks healthy.`);
       return result;
     }
+    if (input.failureKey) {
+      const failure = alert.failures.find((f) => f.key === input.failureKey);
+      if (!failure || !failure.novelty.novel) {
+        result.stage = 'not_escalated';
+        steps.push({
+          stage: 'not_escalated',
+          at: new Date(),
+          summary: failure
+            ? `The failure at ${input.failureKey} is documented: ${failure.novelty.reason}`
+            : `The failure at ${input.failureKey} is no longer among the errors ${input.service} is producing.`,
+        });
+        return result;
+      }
+      alert.primary = failure.cluster;
+      alert.novelty = failure.novelty;
+    }
     if (!alert.escalate) {
       // Not every alert is an incident, and saying so is the point.
       result.stage = 'not_escalated';
@@ -466,6 +495,24 @@ export class IncidentWorkflow {
     }
 
     // ── 2. Identify ──────────────────────────────────────────────────────────
+    // Frames name the runtime's absolute paths. Which part is the repository is
+    // read off the repository's own files at the deployed revision, not guessed
+    // from a list of hosting platforms.
+    const pinned = resolveDeployedRevision(input);
+    if (pinned && alert.primary) {
+      try {
+        const listing = await trace('RepositoryInvestigator', async (ctx) =>
+          (await ctx.tool('github.listFiles', { repo: input.repository, ref: pinned.sha }, () =>
+            this.deps.sourceControl.listFiles(input.repository, pinned.sha),
+          )).value,
+        );
+        const primarySignature = alert.primary.signature;
+        alert.clusters = alert.clusters.map((c) => locateInRepository(c, listing));
+        alert.primary = alert.clusters.find((c) => c.signature === primarySignature) ?? locateInRepository(alert.primary, listing);
+      } catch (err) {
+        step('identified', `Could not list ${input.repository} at ${pinned.sha.slice(0, 12)} to locate frames: ${message(err)}`);
+      }
+    }
     const cluster = alert.primary!;
     const frame = cluster.topApplicationFrame;
     step('identified', describeAlert(alert), {
@@ -733,7 +780,24 @@ export class IncidentWorkflow {
     // production ran the revision before it. The next incident re-diagnosed the
     // same defect and opened a conflicting pull request against code that was
     // already correct.
-    const baseBranch = input.baseBranch ?? 'main';
+    // The branch fixes go to: the service's configured base, else the repository's
+    // own default branch — read from the repository, never assumed to be `main`.
+    let baseBranch: string;
+    try {
+      baseBranch =
+        input.baseBranch ??
+        (await trace('RepositoryInvestigator', async (ctx) =>
+          (await ctx.tool('github.getRepository', { repo: input.repository }, () =>
+            this.deps.sourceControl.getDefaultBranch(input.repository),
+          )).value,
+        ));
+    } catch (err) {
+      return await halt(
+        `Could not read the default branch of ${input.repository}, and the service names no base branch: ${
+          err instanceof Error ? err.message : String(err)
+        }. A fix cannot be proposed without knowing which branch it would merge into.`,
+      );
+    }
     let deploymentLag: string | null = null;
     try {
       const baseHead = await trace('RepositoryInvestigator', async (ctx) => {
@@ -799,7 +863,7 @@ export class IncidentWorkflow {
         changedFiles,
         sources: await this.readSuspectSources(sandbox, cluster, findings),
         testCommand: profile.testCommand,
-        existingTestExample: await this.readTestExample(sandbox),
+        existingTestExample: await this.readTestExample(sandbox, frame ? toRepositoryPath(frame.file) : null),
         investigation: findings,
       };
 
@@ -1468,16 +1532,29 @@ export class IncidentWorkflow {
     return sources;
   }
 
-  /** One existing test, so a new one matches the repository's conventions. */
-  private async readTestExample(sandbox: Sandbox): Promise<{ path: string; source: string } | null> {
-    for (const path of ['test', 'tests', '__tests__', 'src']) {
-      for (const name of ['checkout.test.ts', 'index.test.ts', 'main.test.ts']) {
-        const candidate = `${path}/${name}`;
-        const source = await sandbox.readFile(candidate);
-        if (source !== null) return { path: candidate, source };
-      }
-    }
-    return null;
+  /**
+   * One existing test, so a new one matches the repository's conventions.
+   *
+   * Found by the naming conventions test runners use, not by a list of file names,
+   * and chosen nearest the failing file: a test beside the code under suspicion
+   * shows how that part of the repository is tested.
+   */
+  private async readTestExample(sandbox: Sandbox, near: string | null): Promise<{ path: string; source: string } | null> {
+    const tests = (await sandbox.listFiles()).filter(isTestFile);
+    if (tests.length === 0) return null;
+    const language = near ? near.slice(near.lastIndexOf('.')) : null;
+    const score = (path: string): number => {
+      if (!near) return 0;
+      const a = near.split('/');
+      const b = path.split('/');
+      let shared = 0;
+      while (shared < a.length - 1 && shared < b.length - 1 && a[shared] === b[shared]) shared++;
+      const stem = a[a.length - 1]!.replace(/\.[^.]+$/, '');
+      return shared * 2 + (path.includes(stem) ? 3 : 0) + (language && path.endsWith(language) ? 1 : 0);
+    };
+    const best = [...tests].sort((x, y) => score(y) - score(x) || x.length - y.length || x.localeCompare(y))[0]!;
+    const source = await sandbox.readFile(best);
+    return source === null ? null : { path: best, source };
   }
 
   /**

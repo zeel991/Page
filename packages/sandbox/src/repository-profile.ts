@@ -73,6 +73,11 @@ async function detectPackageManager(
   return 'npm';
 }
 
+/** Any GitHub Actions workflow, whatever it is named. */
+async function hasCiWorkflow(sandbox: Sandbox): Promise<boolean> {
+  return (await sandbox.listDir('.github/workflows')).some((name) => /\.ya?ml$/i.test(name));
+}
+
 export async function profileRepository(sandbox: Sandbox): Promise<RepositoryProfile> {
   const gaps: string[] = [];
   const raw = await sandbox.readFile('package.json');
@@ -139,9 +144,7 @@ export async function profileRepository(sandbox: Sandbox): Promise<RepositoryPro
     typecheckCommand,
     entryPoint: pkg.main ?? pkg.module ?? null,
     hasDockerfile: (await sandbox.readFile('Dockerfile')) !== null,
-    hasCi:
-      (await sandbox.readFile('.github/workflows/ci.yml')) !== null ||
-      (await sandbox.readFile('.github/workflows/test.yml')) !== null,
+    hasCi: await hasCiWorkflow(sandbox),
     scripts,
     gaps,
   };

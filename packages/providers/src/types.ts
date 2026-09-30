@@ -100,6 +100,8 @@ export interface SourceControlProvider {
    * did; the repository does not.
    */
   getBranch(repo: string, name: string): Promise<Branch | null>;
+  /** The repository's default branch, as the repository itself says — never assumed to be `main`. */
+  getDefaultBranch(repo: string): Promise<string>;
   createPullRequest(repo: string, input: CreatePullRequestInput): Promise<PullRequest>;
   /** Commit a set of file changes onto a branch. `null` content deletes a file. */
   commitFiles(repo: string, input: CommitFilesInput): Promise<Commit>;
