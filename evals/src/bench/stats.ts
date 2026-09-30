@@ -24,7 +24,10 @@ export function wilson(successes: number, trials: number, z = 1.959964): Proport
   const denom = 1 + z2 / trials;
   const centre = (p + z2 / (2 * trials)) / denom;
   const half = (z * Math.sqrt((p * (1 - p)) / trials + z2 / (4 * trials * trials))) / denom;
-  return { successes, trials, rate: p, ci95: [Math.max(0, centre - half), Math.min(1, centre + half)] };
+  // At p = 0 or 1 the bound is exactly 0 or 1; rounding would otherwise leave 0.99999….
+  const lower = successes === 0 ? 0 : Math.max(0, centre - half);
+  const upper = successes === trials ? 1 : Math.min(1, centre + half);
+  return { successes, trials, rate: p, ci95: [lower, upper] };
 }
 
 export function quantile(values: readonly number[], q: number): number | null {
