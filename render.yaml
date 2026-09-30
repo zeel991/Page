@@ -59,6 +59,11 @@ services:
       # The API's URL, e.g. https://pager-api.onrender.com. Read at runtime.
       - key: PAGER_API_URL
         sync: false
+      # Shown on the pricing, legal and contact pages.
+      - key: PAGER_LEGAL_NAME
+        sync: false
+      - key: PAGER_SUPPORT_EMAIL
+        sync: false
 
   # ── API ──────────────────────────────────────────────────────────────────────
   - type: web
@@ -102,6 +107,16 @@ services:
       - key: SLACK_CLIENT_ID
         sync: false
       - key: SLACK_CLIENT_SECRET
+        sync: false
+      # Paid plans (Dodo Payments). Webhook URL: <this service>/webhooks/dodo.
+      - key: DODO_PAYMENTS_API_KEY
+        sync: false
+      - key: DODO_PAYMENTS_WEBHOOK_SECRET
+        sync: false
+      # test_mode until the Dodo business is approved for live payments.
+      - key: DODO_PAYMENTS_ENVIRONMENT
+        value: test_mode
+      - key: DODO_PRODUCT_TEAM
         sync: false
 
   # ── Worker ───────────────────────────────────────────────────────────────────

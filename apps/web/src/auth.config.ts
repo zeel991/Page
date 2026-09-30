@@ -25,6 +25,7 @@ export const PROTECTED_PREFIXES = [
   '/onboarding',
   '/services',
   '/settings',
+  '/billing',
 ];
 
 export const authConfig = {

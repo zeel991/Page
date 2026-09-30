@@ -15,3 +15,4 @@ export * from './services-config.js';
 export * from './jobs.js';
 export * from './usage.js';
 export * from './plans.js';
+export * from './billing.js';

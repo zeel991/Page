@@ -24,6 +24,9 @@ export const NOTICES: Record<string, { tone: 'ok' | 'error'; text: string }> = {
   invalid_state: { tone: 'error', text: 'That install link has expired or was altered. Start it again from here.' },
   forbidden: { tone: 'error', text: 'Only an owner or admin of this workspace can connect it.' },
   failed: { tone: 'error', text: 'The install could not be completed. Start it again.' },
+  billing_active: { tone: 'ok', text: 'Payment confirmed by Dodo Payments. This workspace is on its paid plan.' },
+  billing_pending: { tone: 'ok', text: 'Checkout finished. Dodo Payments is confirming the subscription; the plan below updates within a minute or two.' },
+  billing_incomplete: { tone: 'error', text: 'The checkout did not finish, so this workspace’s plan is unchanged.' },
 };
 
 /** The notice code for an API refusal: its own error code when we have a sentence for it. */

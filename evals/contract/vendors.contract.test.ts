@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DODO_BASE_URLS,
   DatadogProvider,
+  DodoApiError,
+  DodoPaymentsClient,
   GitHubProvider,
   SentryProvider,
   SlackAppClient,
@@ -21,6 +24,7 @@ import { Sandbox } from '@pager/sandbox';
  *   CONTRACT_SLACK_BOT_TOKEN  [CONTRACT_SLACK_CHANNEL + CONTRACT_SLACK_POST=1 to post]
  *   CONTRACT_DATADOG_API_KEY, CONTRACT_DATADOG_APP_KEY, CONTRACT_DATADOG_SITE, CONTRACT_DATADOG_SERVICE
  *   CONTRACT_SENTRY_TOKEN, CONTRACT_SENTRY_ORG, CONTRACT_SENTRY_PROJECT  [CONTRACT_SENTRY_URL]
+ *   CONTRACT_DODO_API_KEY (test mode), CONTRACT_DODO_PRODUCT  [CONTRACT_DODO_CHECKOUT=1 to open a checkout]
  *
  * Read-only unless asked otherwise: the one write (a Slack message) needs its own flag.
  * Use sandbox accounts — a test repository, a test Slack workspace — not production.
@@ -138,5 +142,31 @@ describe.skipIf(!sentry.token || !sentry.org || !sentry.project)('Sentry', () =>
       expect(g.count).toBeGreaterThan(0);
       for (const f of g.frames) expect(typeof f.inApp).toBe('boolean');
     }
+  });
+});
+
+// Test mode only: this suite never talks to Dodo's live host.
+const dodo = { key: env('CONTRACT_DODO_API_KEY'), product: env('CONTRACT_DODO_PRODUCT') };
+describe.skipIf(!dodo.key || !dodo.product)('Dodo Payments (test mode)', () => {
+  const client = () => new DodoPaymentsClient({ baseUrl: DODO_BASE_URLS.test_mode, apiKey: dodo.key! });
+
+  it('reads the product and its recurring price', async () => {
+    const p = await client().getProduct(dodo.product!);
+    expect(p.productId).toBe(dodo.product);
+    expect(p.price).not.toBeNull();
+    expect(p.price!.amount).toBeGreaterThan(0);
+    expect(p.price!.recurring).toBe(true);
+  });
+
+  it('answers an unknown subscription with a coded 404', async () => {
+    const err = await client().getSubscription('sub_does_not_exist').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DodoApiError);
+    expect((err as DodoApiError).status).toBe(404);
+  });
+
+  it.skipIf(env('CONTRACT_DODO_CHECKOUT') !== '1')('opens a hosted checkout, with a URL and a session id', async () => {
+    const c = await client().createCheckout({ productId: dodo.product!, returnUrl: 'https://example.com/billing/return', metadata: { workspace_id: 'contract-test' } });
+    expect(c.sessionId).toMatch(/^cks_/);
+    expect(c.checkoutUrl).toMatch(/^https:\/\//);
   });
 });

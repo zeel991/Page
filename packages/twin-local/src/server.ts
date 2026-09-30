@@ -8,6 +8,7 @@ import { GIT_PATH, TwinGitServer } from './git-http.js';
 import { matchRoute, type Route } from './router.js';
 import { slackRoutes } from './slack-routes.js';
 import { sentryRoutes } from './sentry-routes.js';
+import { dodoRoutes } from './dodo-routes.js';
 import { jiraRoutes, linearRoutes, notionRoutes } from './tracker-routes.js';
 import { resendRoutes } from './email-routes.js';
 import { cloneState, emptyState, type TwinState } from './store.js';
@@ -40,6 +41,7 @@ export interface TwinEndpoints {
   notion: string;
   resend: string;
   sentry: string;
+  dodo: string;
 }
 
 export class LocalTwinServer {
@@ -62,6 +64,7 @@ export class LocalTwinServer {
       { prefix: '/notion', routes: notionRoutes() },
       { prefix: '/resend', routes: resendRoutes() },
       { prefix: '/sentry', routes: sentryRoutes() },
+      { prefix: '/dodo', routes: dodoRoutes() },
     ];
   }
 
@@ -95,6 +98,7 @@ export class LocalTwinServer {
       notion: `${base}/notion`,
       resend: `${base}/resend`,
       sentry: `${base}/sentry`,
+      dodo: `${base}/dodo`,
     };
   }
 

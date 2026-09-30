@@ -8,7 +8,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "node --env-file-if-exists=../../.env --experimental-strip-types --watch src/main.ts",
     "start": "node --env-file-if-exists=../../.env --experimental-strip-types src/main.ts",
-    "seed": "node --env-file-if-exists=../../.env --experimental-strip-types src/seed.ts"
+    "seed": "node --env-file-if-exists=../../.env --experimental-strip-types src/seed.ts",
+    "dev:stack": "node --experimental-strip-types src/dev-stack.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

@@ -18,4 +18,5 @@ export * from './deployed-revision.js';
 export * from './connection-tests.js';
 export * from './github/app-env.js';
 export * from './sentry/sentry-provider.js';
+export * from './dodo/dodo-payments.js';
 export * from './unavailable-metrics.js';
