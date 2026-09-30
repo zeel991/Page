@@ -18,8 +18,11 @@ import {
   Sandbox,
   ValidationEngine,
   describeAssertionEvidence,
-  installDependencies,
   describeReproduction,
+  establishBaseline,
+  excludedFromGate,
+  installDependencies,
+  onlyExcludedFailures,
   profileRepository,
   singleTestCommand,
   testCountRegression,
@@ -27,6 +30,7 @@ import {
   type InstallResult,
   type ReproductionAttempt,
   type SandboxRunner,
+  type SuiteBaseline,
   type ValidationRun,
 } from '@pager/sandbox';
 import { ProductionWatcher, describeAlert, type ProductionAlert } from './production-watcher.js';
@@ -312,6 +316,26 @@ export function isTestFile(path: string): boolean {
   return /(^|\/)(test|tests|__tests__)\//.test(path) && /\.([cm]?[jt]sx?|py)$/.test(name) && !/(^|\/)(fixtures?|helpers?)\//.test(path);
 }
 
+/** A suffix for the baseline step: what was set aside, if anything. */
+function describeBaseline(b: SuiteBaseline): string {
+  if (b.passed || b.runs.some((r) => r.skipped)) return '';
+  if (!b.known) return ' — red, and its failures could not all be named, so none can be set aside.';
+  return ` — ${b.failing.length} test(s) already failing and ${b.flaky.length} flaky across ${b.runs.length} runs; set aside by name.`;
+}
+
+/** The pull request's statement of which tests the gate did not hold this patch to. */
+export function excludedSection(b: SuiteBaseline | null): string {
+  if (!b || b.passed || !b.known || b.failing.length + b.flaky.length === 0) return '';
+  const list = (names: string[]) => names.map((n) => `  - \`${n}\``).join('\n');
+  return (
+    `**Excluded from the gate.** The suite was run ${b.runs.length} times at the deployed revision before anything was changed. ` +
+    `These tests were not held against this patch, because they did not pass there:\n` +
+    (b.failing.length ? `- Already failing in every run:\n${list(b.failing)}\n` : '') +
+    (b.flaky.length ? `- Flaky (failed in some runs, not others):\n${list(b.flaky)}\n` : '') +
+    `\n`
+  );
+}
+
 /** The readable half of an unknown thrown value. */
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -341,6 +365,8 @@ export interface WorkflowResult {
   regressionTest: RegressionTestProposal | null;
   /** Checks run before the regression test existed, to rule out a broken suite. */
   preexistingChecks: ValidationRun | null;
+  /** The suite at the deployed revision, run twice: what was already failing, and what is flaky. */
+  suiteBaseline: SuiteBaseline | null;
   /** How the repository's dependencies were installed, or why they were not. */
   dependencies: InstallResult | null;
   /** True when a bounded repair retry was used. */
@@ -385,6 +411,7 @@ export class IncidentWorkflow {
       deployedRevision: null,
       regressionTest: null,
       preexistingChecks: null,
+      suiteBaseline: null,
       dependencies: null,
       repairAttempted: false,
       recoveryVerdict: null,
@@ -848,11 +875,16 @@ export class IncidentWorkflow {
       const validation = new ValidationEngine(sandbox);
       const reproduction = new ReproductionAgent(sandbox, validation);
 
-      // The repository's own checks, BEFORE anything is added. A suite that was
-      // already red cannot be used to prove a new assertion fails.
-      const preexisting = await validation.runCheck('test', profile.testCommand);
+      // The repository's own checks, BEFORE anything is added — twice, so a test that
+      // fails only sometimes is told apart from one that is simply broken. Tests
+      // already failing or flaky here are set aside by name rather than blocking the
+      // incident, and the pull request says which.
+      const baseline = await establishBaseline(validation, profile.testCommand);
+      const preexisting = baseline.runs[0]!;
+      const excluded = excludedFromGate(baseline);
       result.preexistingChecks = preexisting;
-      step('reproducing', `Existing checks at the deployed revision: ${describeCheck(preexisting)}`);
+      result.suiteBaseline = baseline;
+      step('reproducing', `Existing checks at the deployed revision: ${describeCheck(preexisting)}${describeBaseline(baseline)}`);
 
       const context: PatchContext = {
         service: input.service,
@@ -909,6 +941,8 @@ export class IncidentWorkflow {
         command: isolated ?? profile.testCommand ?? 'node --test',
         expectedFailureMarkers: proposedTest.expectedFailureMarkers,
         baseline: preexisting,
+        excludedFailures: excluded,
+        isolated: Boolean(isolated),
       });
       result.reproduction = attempt;
 
@@ -935,6 +969,7 @@ export class IncidentWorkflow {
         profile,
         test: proposedTest,
         preexisting,
+        excluded,
         step,
         advance,
       });
@@ -991,6 +1026,7 @@ export class IncidentWorkflow {
               slackChannel: input.slackChannel,
               slackThreadTs: thread.id,
               preexisting,
+              baseline: result.suiteBaseline,
               repairAttempted: outcome.repairAttempted,
               diffGap,
               modelUsage: result.investigation,
@@ -1158,6 +1194,7 @@ export class IncidentWorkflow {
       deployedRevision: null,
       regressionTest: null,
       preexistingChecks: null,
+      suiteBaseline: null,
       dependencies: null,
       repairAttempted: false,
       recoveryVerdict: null,
@@ -1668,6 +1705,8 @@ export class IncidentWorkflow {
     test: RegressionTestProposal;
     /** The suite at the deployed revision, before anything was added. */
     preexisting: ValidationRun;
+    /** Tests excluded from the gate by name; null when none can be. */
+    excluded: string[] | null;
     step: (stage: WorkflowStage, summary: string, detail?: Record<string, unknown>) => void;
     advance: (to: IncidentState, summary: string) => Promise<void>;
   }): Promise<{
@@ -1770,7 +1809,16 @@ export class IncidentWorkflow {
       }
 
       await advance('VALIDATING', 'Running deterministic verification.');
-      const summary = await validation.runAll(profile);
+      const raw = await validation.runAll(profile);
+      // The suite passes the gate when it is green, or red only in tests that were
+      // already failing or flaky before anything was changed.
+      const summary = (() => {
+        const excused = raw.runs.map((r) => r.kind === 'test' && !r.skipped && !r.passed && onlyExcludedFailures(r, args.excluded));
+        if (!excused.some(Boolean)) return raw;
+        const runs = raw.runs.map((r, i) => (excused[i] ? { ...r, passed: true } : r));
+        const executed = runs.filter((r) => !r.skipped);
+        return { ...raw, runs, allPassed: executed.length > 0 && executed.every((r) => r.passed) };
+      })();
       const runs = [confirmed.afterFix!, ...summary.runs];
       step('validating', `Verification: ${summary.allPassed ? 'passed' : 'FAILED'}`, {
         ran: summary.runs.filter((r) => !r.skipped).map((r) => r.kind),
@@ -1779,7 +1827,7 @@ export class IncidentWorkflow {
 
       // A passing suite proves little if the patch made it smaller. Counted against
       // the run at the deployed revision, before anything was added.
-      const shrunk = summary.allPassed
+      const shrunk = summary.allPassed && raw.allPassed
         ? testCountRegression(
             { passed: args.preexisting.testsPassed, failed: args.preexisting.testsFailed },
             (() => {
@@ -1919,6 +1967,7 @@ export class IncidentWorkflow {
     slackChannel: string;
     slackThreadTs: string;
     preexisting: ValidationRun;
+    baseline?: SuiteBaseline | null;
     repairAttempted: boolean;
     diffGap: string | null;
     modelUsage: InvestigationResult | null;
@@ -1975,6 +2024,7 @@ export class IncidentWorkflow {
 
       `## Reproduction — fail before, pass after\n` +
         `Checks at the deployed revision **before** the regression test existed: ${describeCheck(args.preexisting)}\n\n` +
+        excludedSection(args.baseline ?? null) +
         `${describeReproduction(args.reproduction)}\n\n` +
         `The test proves: ${args.test.expectedFailureDescription}\n\n` +
         `Command: \`${args.reproduction.command}\`  \n` +

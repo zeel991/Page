@@ -125,6 +125,22 @@ afterEach(async () => {
 });
 
 describe('repositories that are not the demo', () => {
+  it('does not let a test that was already failing block the incident, and says which it set aside', async () => {
+    // The deployed revision ships a broken, unrelated test alongside the bug.
+    const LEGACY = `import { it } from 'node:test';\nimport assert from 'node:assert/strict';\nit('legacy importer keeps totals', () => assert.equal(1, 2));\n`;
+    const commits = INC_001.commits.map((c, i, all) =>
+      i === all.length - 1 ? { ...c, changes: [...c.changes, { path: 'test/legacy.test.ts', content: LEGACY }] } : c,
+    );
+    const { workflow, deployment } = await build({ ...INC_001, commits }, 'scripted');
+    const result = await workflow.run({ ...input, deployment });
+    expect(result.haltReason).toBeNull();
+    expect(result.suiteBaseline).toMatchObject({ passed: false, known: true, failing: ['legacy importer keeps totals'] });
+    const repo = server.current.repositories.get('acme/checkout-api')!;
+    const pr = repo.pullRequests.find((p) => p.number === result.pullRequest!.number)!;
+    expect(pr.body).toMatch(/Excluded from the gate/);
+    expect(pr.body).toContain('`legacy importer keeps totals`');
+  });
+
   it('recognises test files by the runners’ conventions, not by a list of names', () => {
     for (const path of ['src/cart/pricing.test.ts', 'lib/api.spec.js', 'tests/test_orders.py', 'app/orders_test.py', '__tests__/cart.jsx', 'test/integration/checkout.mjs']) {
       expect(isTestFile(path), path).toBe(true);

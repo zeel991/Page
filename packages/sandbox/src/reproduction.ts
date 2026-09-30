@@ -1,5 +1,6 @@
 import type { Sandbox } from './sandbox.js';
 import type { ValidationEngine, ValidationRun } from './validation.js';
+import { onlyExcludedFailures, parseTestResults } from './test-results.js';
 
 /**
  * Reproduction: proving a failure exists, and then proving a patch removes it.
@@ -48,6 +49,11 @@ export interface AssertionEvidence {
   foundMarkers: string[];
   /** Failures in the pre-existing suite, which must not be counted as the reproduction. */
   preexistingFailure: boolean;
+  /**
+   * Tests that were already failing (or flaky) at the deployed revision and were
+   * excluded from the gate by name. Empty when the suite was green.
+   */
+  excludedFailures: string[];
   /** Every check that did not hold. Empty when the reproduction is sound. */
   problems: string[];
 }
@@ -79,6 +85,15 @@ export interface ReproductionInput {
    * assertion, and the reproduction is refused.
    */
   baseline?: ValidationRun | null;
+  /**
+   * Tests excluded from the gate because they already failed, or failed only
+   * sometimes, at the deployed revision — named, so they can be told apart from the
+   * new assertion. Null when they could not all be named, which leaves a red
+   * baseline blocking.
+   */
+  excludedFailures?: readonly string[] | null;
+  /** The command runs the regression test alone, so failures elsewhere cannot reach it. */
+  isolated?: boolean;
   timeoutMs?: number;
 }
 
@@ -120,6 +135,7 @@ function emptyAssertionEvidence(): AssertionEvidence {
     requiredMarkers: [],
     foundMarkers: [],
     preexistingFailure: false,
+    excludedFailures: [],
     problems: [],
   };
 }
@@ -211,14 +227,27 @@ export class ReproductionAgent {
       }
     }
 
-    // A suite that was already failing cannot be used to prove a new assertion fails.
+    // A suite that was already failing cannot by itself prove a new assertion fails.
+    // It can when the regression test ran alone, or when the failures that were
+    // already there are known by name and something else failed too.
     if (input.baseline && !input.baseline.skipped && !input.baseline.passed) {
       evidence.preexistingFailure = true;
-      evidence.problems.push(
-        `the repository's own checks already failed before the regression test was added ` +
-          `(exit ${input.baseline.exitCode}), so a failing run afterwards is not attributable to ` +
-          `the new assertion`,
-      );
+      evidence.excludedFailures = [...(input.excludedFailures ?? [])];
+      if (!input.isolated) {
+        const results = parseTestResults(output, beforeFix.testsFailed, beforeFix.exitCode);
+        const excluded = new Set(input.excludedFailures ?? []);
+        const attributable = results && input.excludedFailures ? results.failed.filter((n) => !excluded.has(n)) : null;
+        if (!attributable || attributable.length === 0) {
+          evidence.problems.push(
+            `the repository's own checks already failed before the regression test was added ` +
+              `(exit ${input.baseline.exitCode}), and ` +
+              (attributable === null
+                ? 'those failures could not all be named, so none can be set aside'
+                : 'no test failed other than the ones already failing') +
+              `, so a failing run afterwards is not attributable to the new assertion`,
+          );
+        }
+      }
     }
 
     if (evidence.problems.length > 0) {
@@ -240,6 +269,7 @@ export class ReproductionAgent {
     attempt: ReproductionAttempt,
     timeoutMs?: number,
   ): Promise<ReproductionAttempt> {
+    const excluded = attempt.assertionEvidence.excludedFailures;
     if (attempt.beforeFix.passed || attempt.failureReason) {
       throw new ReproductionError(
         'Refusing to confirm a fix against a reproduction that was never established: ' +
@@ -248,7 +278,9 @@ export class ReproductionAgent {
     }
 
     const afterFix = await this.validation.runCheck('reproduction', attempt.command, timeoutMs);
-    const proven = afterFix.passed;
+    // Passing, or failing only in tests that were already failing before anything
+    // was changed — which the patch neither caused nor was asked to fix.
+    const proven = afterFix.passed || onlyExcludedFailures(afterFix, excluded.length ? excluded : null);
 
     return {
       ...attempt,
@@ -294,5 +326,8 @@ export function describeAssertionEvidence(evidence: AssertionEvidence): string {
     parts.push(`expected failure text present: ${evidence.foundMarkers.map((m) => JSON.stringify(m)).join(', ')}`);
   }
   if (!evidence.preexistingFailure) parts.push('the pre-existing checks passed beforehand');
+  else if (evidence.excludedFailures.length > 0) {
+    parts.push(`${evidence.excludedFailures.length} test(s) already failing or flaky at the deployed revision were set aside by name`);
+  } else parts.push('the regression test ran alone, apart from the tests already failing');
   return `Verified: ${parts.join('; ')}.`;
 }
