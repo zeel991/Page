@@ -56,7 +56,7 @@ interface ScenarioManifest {
 }
 
 /** Files that exist on disk but are not part of the repository being simulated. */
-const EXCLUDED = new Set(['node_modules', '.git', '.DS_Store']);
+const EXCLUDED = new Set(['node_modules', '.git', '.DS_Store', '.venv', '__pycache__', '.pytest_cache']);
 
 function walk(root: string, dir = root): string[] {
   const out: string[] = [];

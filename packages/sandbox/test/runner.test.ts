@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { DockerRunner, dockerRunArgs, type RunSpec } from '../src/runner.js';
+import { DockerRunner, LocalProcessRunner, dockerRunArgs, repositoryPath, type RunSpec } from '../src/runner.js';
 
 /**
  * DockerRunner is tested against the command it builds, because this machine has
@@ -49,7 +49,7 @@ describe('dockerRunArgs', () => {
 
   it('passes the allow-listed environment and nothing of the host', () => {
     const env = args.flatMap((a, i) => (args[i - 1] === '--env' ? [a] : []));
-    expect(env.map((e) => e.split('=')[0]).sort()).toEqual(['CI', 'FORCE_COLOR', 'HOME', 'NODE_ENV', 'PATH', 'TMPDIR']);
+    expect(env.map((e) => e.split('=')[0]).sort()).toEqual(['CI', 'FORCE_COLOR', 'HOME', 'NODE_ENV', 'NO_COLOR', 'PATH', 'TMPDIR']);
     expect(env).toContain('HOME=/home/sandbox');
   });
 
@@ -82,5 +82,38 @@ describe('DockerRunner', () => {
     const kill = calls.find((c) => c.args[0] === 'kill');
     expect(kill?.args[1]).toBe(pair(run.args, '--name'));
     void pending;
+  });
+});
+
+describe('binary resolution in the repository', () => {
+  it('runs the repository’s own node_modules/.bin, never another project’s from the host PATH', async () => {
+    const { mkdtemp, mkdir, writeFile, chmod, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const root = await mkdtemp(join(tmpdir(), 'pager-bin-'));
+    try {
+      const other = join(root, 'host-project', 'node_modules', '.bin');
+      const repo = join(root, 'repo');
+      await mkdir(other, { recursive: true });
+      await mkdir(join(repo, 'node_modules', '.bin'), { recursive: true });
+      for (const [dir, who] of [[other, 'host'], [join(repo, 'node_modules', '.bin'), 'repository']] as const) {
+        await writeFile(join(dir, 'runner-under-test'), `#!/bin/sh\necho ${who}\n`);
+        await chmod(join(dir, 'runner-under-test'), 0o755);
+      }
+      expect(repositoryPath(repo, `${other}:/usr/bin:/bin`)).toBe(`${repo}/node_modules/.bin:/usr/bin:/bin`);
+
+      const saved = process.env.PATH;
+      process.env.PATH = `${other}:${saved}`;
+      try {
+        const out = await new LocalProcessRunner().run({
+          command: 'runner-under-test', args: [], workDir: repo, homeDir: root, tmpDir: root, env: {}, timeoutMs: 10_000, maxOutputBytes: 1000,
+        });
+        expect(out.stdout.trim()).toBe('repository');
+      } finally {
+        process.env.PATH = saved;
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -28,7 +28,8 @@
     "demo:repo": "cd demo/checkout-api && node --test",
     "eval:agent": "pnpm --filter @pager/evals eval:agent",
     "probe:datadog": "pnpm --filter @pager/evals probe:datadog",
-    "db:migrate": "pnpm --filter @pager/db migrate"
+    "db:migrate": "pnpm --filter @pager/db migrate",
+    "demo:e2e": "pnpm --filter @pager/evals e2e"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

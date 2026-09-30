@@ -72,6 +72,10 @@ export function sandboxEnvironment(opts: {
     HOME: opts.home,
     TMPDIR: opts.tmp,
     CI: '1',
+    // CI=1 turns colour ON in several runners (vitest's among them); escape codes in
+    // the output would defeat every pattern that reads it.
+    NO_COLOR: '1',
+    FORCE_COLOR: '0',
     NODE_ENV: 'test',
     ...(opts.extra ?? {}),
   };
@@ -186,6 +190,17 @@ export function runProcess(
   });
 }
 
+/**
+ * PATH for a command in the repository: its own `node_modules/.bin` first, as `npm
+ * run` would, and no other project's. A host PATH inherited through a package
+ * manager carries that project's `.bin` directories, and without this the
+ * repository's `vitest` resolved to whichever vitest the host happened to have.
+ */
+export function repositoryPath(workDir: string, hostPath: string | undefined, sep = ':'): string {
+  const host = (hostPath ?? '/usr/local/bin:/usr/bin:/bin').split(sep).filter((p) => p && !/[\\/]node_modules[\\/]\.bin[\\/]?$/.test(p));
+  return [`${workDir}/node_modules/.bin`, ...host].join(sep);
+}
+
 /** Development only: runs on this host, as this user, with this host's network. */
 export class LocalProcessRunner implements SandboxRunner {
   readonly kind = 'local-process' as const;
@@ -198,7 +213,7 @@ export class LocalProcessRunner implements SandboxRunner {
   run(spec: RunSpec): Promise<CommandResult> {
     return runProcess(this.spawnImpl, spec.command, spec.args, {
       cwd: spec.workDir,
-      env: sandboxEnvironment({ path: process.env.PATH, home: spec.homeDir, tmp: spec.tmpDir, extra: spec.env }),
+      env: sandboxEnvironment({ path: repositoryPath(spec.workDir, process.env.PATH), home: spec.homeDir, tmp: spec.tmpDir, extra: spec.env }),
       timeoutMs: spec.timeoutMs,
       maxOutputBytes: spec.maxOutputBytes,
     });
@@ -225,7 +240,7 @@ export interface DockerRunnerOptions {
  */
 export function dockerRunArgs(spec: RunSpec, opts: DockerRunnerOptions, containerName: string): string[] {
   const env = sandboxEnvironment({
-    path: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    path: '/work/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     home: '/home/sandbox',
     tmp: '/tmp',
     extra: spec.env,

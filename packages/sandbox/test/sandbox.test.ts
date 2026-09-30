@@ -68,8 +68,20 @@ describe('Sandbox containment', () => {
       HOME: '/s/home',
       TMPDIR: '/s/tmp',
       CI: '1',
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
       NODE_ENV: 'test',
     });
+  });
+
+  it('reads a runner that colours its output anyway', async () => {
+    // vitest colours its summary under CI=1; the escape codes hid "Tests  1 failed".
+    const s = await makeSandbox();
+    const v = new ValidationEngine(s);
+    await s.writeFile('emit.cjs', 'process.stdout.write("\\u001b[2m Tests \\u001b[22m \\u001b[31m1 failed\\u001b[39m | 2 passed\\n"); process.exit(1);\n');
+    const run = await v.runCheck('test', 'node emit.cjs');
+    expect(run.output).toBe('Tests  1 failed | 2 passed');
+    expect(run).toMatchObject({ testsFailed: 1, testsPassed: 2 });
   });
 
   it('does not leak this process environment or home directory into a child', async () => {
@@ -82,7 +94,7 @@ describe('Sandbox containment', () => {
       const result = await s.run('node', ['-e', 'console.log(JSON.stringify(process.env))']);
       const env = JSON.parse(result.stdout) as Record<string, string>;
       // macOS adds __CF_USER_TEXT_ENCODING to every process; it is not inherited from us.
-      expect(Object.keys(env).filter((k) => !k.startsWith('__CF_')).sort()).toEqual(['CI', 'HOME', 'NODE_ENV', 'PATH', 'TMPDIR']);
+      expect(Object.keys(env).filter((k) => !k.startsWith('__CF_')).sort()).toEqual(['CI', 'FORCE_COLOR', 'HOME', 'NODE_ENV', 'NO_COLOR', 'PATH', 'TMPDIR']);
       expect(env.HOME).not.toBe(homedir());
       expect(env.HOME!.startsWith(s.root)).toBe(true);
       // Outside the working copy, so a test runner never discovers it.

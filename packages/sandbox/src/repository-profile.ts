@@ -10,7 +10,7 @@ import type { Sandbox } from './sandbox.js';
 
 export interface RepositoryProfile {
   language: string | null;
-  packageManager: 'pnpm' | 'npm' | 'yarn' | 'bun' | null;
+  packageManager: 'pnpm' | 'npm' | 'yarn' | 'bun' | 'pip' | 'uv' | null;
   testCommand: string | null;
   buildCommand: string | null;
   lintCommand: string | null;
@@ -83,7 +83,9 @@ export async function profileRepository(sandbox: Sandbox): Promise<RepositoryPro
   const raw = await sandbox.readFile('package.json');
 
   if (!raw) {
-    gaps.push('No package.json found; this profiler only understands Node projects.');
+    const python = await profilePython(sandbox, gaps);
+    if (python) return python;
+    gaps.push('No package.json, pyproject.toml or requirements file found; this profiler understands Node and Python projects.');
     return {
       language: null,
       packageManager: null,
@@ -151,6 +153,39 @@ export async function profileRepository(sandbox: Sandbox): Promise<RepositoryPro
 }
 
 /**
+ * A Python project: pyproject.toml, a requirements file, or setup.py.
+ *
+ * Tests run with pytest from the project's own virtualenv (`.venv`, created by the
+ * dependency install), with `-rA` so every test's outcome is named in the output —
+ * that is what lets tests already failing be set aside by name.
+ */
+async function profilePython(sandbox: Sandbox, gaps: string[]): Promise<RepositoryProfile | null> {
+  const pyproject = await sandbox.readFile('pyproject.toml');
+  const requirements = (await sandbox.readFile('requirements.txt')) ?? (await sandbox.readFile('requirements.lock'));
+  const setup = await sandbox.readFile('setup.py');
+  if (pyproject === null && requirements === null && setup === null) return null;
+
+  const uv = (await sandbox.readFile('uv.lock')) !== null;
+  const declaresPytest = /\bpytest\b/i.test(`${pyproject ?? ''}\n${requirements ?? ''}`);
+  if (!declaresPytest) gaps.push('pytest is not declared as a dependency; the test command assumes it is available.');
+  const venv = uv || requirements !== null;
+  const python = venv ? '.venv/bin/python' : 'python3';
+  return {
+    language: 'python',
+    packageManager: uv ? 'uv' : 'pip',
+    testCommand: `${python} -m pytest -rA -p no:cacheprovider`,
+    buildCommand: null,
+    lintCommand: null,
+    typecheckCommand: null,
+    entryPoint: null,
+    hasDockerfile: (await sandbox.readFile('Dockerfile')) !== null,
+    hasCi: await hasCiWorkflow(sandbox),
+    scripts: {},
+    gaps,
+  };
+}
+
+/**
  * A command that runs one test file, rather than the whole suite.
  *
  * Reproduction must isolate the new regression test: if it runs alongside a suite
@@ -175,5 +210,6 @@ export function singleTestCommand(profile: RepositoryProfile, testPath: string):
     return /\brun\b/.test(trimmed) ? `${trimmed} ${testPath}` : `${trimmed} run ${testPath}`;
   }
   if (/^(npx\s+)?jest\b/.test(trimmed)) return `${trimmed} ${testPath}`;
+  if (/(^|\s)-m\s+pytest\b|^pytest\b/.test(trimmed)) return `${trimmed} ${testPath}`;
   return null;
 }

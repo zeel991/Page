@@ -1,0 +1,127 @@
+{
+  "id": "INC-020",
+  "title": "A stricter tax lookup raises KeyError for regions without a rate",
+  "service": "billing-api",
+  "repository": "acme/billing-api",
+  "description": "Invoice totals service (Python)",
+  "defaultBranch": "main",
+  "workingTree": "billing-api",
+  "windowFrom": "2026-09-13T14:00:00Z",
+  "windowTo": "2026-09-13T15:00:00Z",
+  "deployedAt": "2026-09-13T14:31:00Z",
+  "commits": [
+    {
+      "message": "Initial billing service",
+      "author": "Priya",
+      "at": "2026-09-10T09:00:00Z",
+      "branch": "main",
+      "include": [
+        "**"
+      ],
+      "overlay": "history/before-strict-lookup"
+    },
+    {
+      "message": "Look up tax rates strictly",
+      "author": "Dana",
+      "at": "2026-09-13T14:20:00Z",
+      "branch": "main",
+      "include": [
+        "billing/tax.py"
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "service": "billing-api",
+      "metric": "error_rate",
+      "unit": "ratio",
+      "baseline": 0.003,
+      "after": 0.142,
+      "jitter": 0.08
+    },
+    {
+      "service": "billing-api",
+      "metric": "http_5xx_rate",
+      "unit": "ratio",
+      "baseline": 0.002,
+      "after": 0.139,
+      "jitter": 0.08
+    },
+    {
+      "service": "billing-api",
+      "metric": "latency_p95",
+      "unit": "ms",
+      "baseline": 95,
+      "after": 97,
+      "jitter": 0.04
+    },
+    {
+      "service": "billing-api",
+      "metric": "latency_p50",
+      "unit": "ms",
+      "baseline": 31,
+      "after": 31,
+      "jitter": 0.04
+    },
+    {
+      "service": "billing-api",
+      "metric": "request_throughput",
+      "unit": "requests/s",
+      "baseline": 120,
+      "after": 119,
+      "jitter": 0.03
+    },
+    {
+      "service": "billing-api",
+      "metric": "availability",
+      "unit": "ratio",
+      "baseline": 0.9997,
+      "after": 0.9995,
+      "jitter": 0.0002
+    }
+  ],
+  "logs": [
+    {
+      "service": "billing-api",
+      "level": "error",
+      "message": "invoice failed",
+      "stack": "Traceback (most recent call last):\n  File \"/usr/local/lib/python3.12/http/server.py\", line 427, in handle_one_request\n    method()\n  File \"/srv/app/billing/app.py\", line 13, in do_POST\n    total = invoice_total_cents(order)\n  File \"/srv/app/billing/service.py\", line 12, in invoice_total_cents\n    return subtotal + round(subtotal * tax_rate(order[\"region\"]))\n  File \"/srv/app/billing/tax.py\", line 14, in tax_rate\n    return TAX_RATES[region]\nKeyError: 'ap-south'",
+      "from": "2026-09-13T14:32:00Z",
+      "count": 20,
+      "intervalSeconds": 45,
+      "attributes": {
+        "http.route": "POST /invoices",
+        "http.status_code": 500,
+        "logger": "billing.app"
+      }
+    },
+    {
+      "service": "billing-api",
+      "level": "info",
+      "message": "invoice created",
+      "from": "2026-09-13T14:05:00Z",
+      "count": 12,
+      "intervalSeconds": 120
+    }
+  ],
+  "monitors": [
+    {
+      "name": "billing-api error rate",
+      "service": "billing-api",
+      "query": "avg(last_5m):sum:trace.http.request.errors{service:billing-api}.as_rate() > 0.05",
+      "state": "Alert",
+      "transitionedAt": "2026-09-13T14:34:00Z"
+    }
+  ],
+  "slackChannels": [
+    "#incidents",
+    "#billing-team"
+  ],
+  "pages": [
+    {
+      "id": "runbook-billing",
+      "title": "Runbook: billing-api",
+      "file": "runbooks/billing-api.md"
+    }
+  ]
+}

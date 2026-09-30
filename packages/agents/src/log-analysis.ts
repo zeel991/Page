@@ -38,10 +38,18 @@ export interface ErrorCluster {
   affectedRoutes: string[];
 }
 
-const DEPENDENCY_MARKERS = ['node_modules/', 'site-packages/', 'vendor/', '/usr/lib/', 'node:internal'];
+const DEPENDENCY_MARKERS = ['node_modules/', 'site-packages/', 'dist-packages/', 'vendor/', '/usr/lib/', 'node:internal', '<frozen ', '/lib/python3'];
 
-/** Parse a V8-style stack trace into frames. */
+/**
+ * Parse a stack trace into frames, innermost first.
+ *
+ * Two shapes: V8's (`at fn (/path/file.ts:12:5)`, innermost first) and Python's
+ * traceback (`File "/path/file.py", line 12, in fn`, outermost first — so its frames
+ * are reversed, and "the first application frame" means the same thing for both).
+ */
 export function parseStackTrace(stack: string): StackFrame[] {
+  const python = parsePythonTraceback(stack);
+  if (python.length > 0) return python;
   const frames: StackFrame[] = [];
 
   for (const raw of stack.split('\n')) {
@@ -70,6 +78,29 @@ export function parseStackTrace(stack: string): StackFrame[] {
   }
 
   return frames;
+}
+
+/** Frames from a Python traceback, innermost first. Empty when the text is not one. */
+export function parsePythonTraceback(stack: string): StackFrame[] {
+  const frames: StackFrame[] = [];
+  for (const m of stack.matchAll(/^\s*File "(.+?)", line (\d+)(?:, in (.+?))?\s*$/gm)) {
+    const file = m[1]!;
+    frames.push({
+      functionName: m[3] && m[3] !== '<module>' ? m[3] : null,
+      file,
+      line: Number(m[2]),
+      column: null,
+      isDependency: DEPENDENCY_MARKERS.some((d) => file.includes(d)),
+    });
+  }
+  return frames.reverse();
+}
+
+/** The exception line a Python traceback ends with, e.g. "KeyError: 'discount'". */
+function pythonExceptionLine(stack: string): string | null {
+  if (!/Traceback \(most recent call last\):/.test(stack)) return null;
+  const lines = stack.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines[lines.length - 1] ?? null;
 }
 
 /**
@@ -256,6 +287,10 @@ const ERROR_TYPE_KEYS = ['error', 'error.kind', 'error.type', 'exception.type'];
 function errorTypeOf(log: LogEntry): string | null {
   const fromMessage = errorType(log.message);
   if (fromMessage) return fromMessage;
+  // A Python logger's message is often just the text; the type ends the traceback.
+  const last = log.stackTrace ? pythonExceptionLine(log.stackTrace) : null;
+  const fromTrace = last ? errorType(last.replace(/^(?:[a-z_][\w]*\.)+/, '')) : null;
+  if (fromTrace) return fromTrace;
   for (const key of ERROR_TYPE_KEYS) {
     const value = log.attributes[key];
     if (typeof value === 'string' && /^[A-Z][A-Za-z0-9_]*$/.test(value)) return value;

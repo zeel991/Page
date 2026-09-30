@@ -1556,14 +1556,17 @@ export class IncidentWorkflow {
       if (content !== null) sources[path] = content;
     }
 
-    // One hop of relative imports, so the shape a patch must satisfy is present.
+    // One hop of imports, so the shape a patch must satisfy is present.
     for (const [path, content] of Object.entries({ ...sources })) {
-      const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-      for (const match of content.matchAll(/from\s+['"](\.[^'"]+)['"]/g)) {
-        const resolved = normaliseRelative(dir, match[1]!);
-        if (!resolved || sources[resolved] !== undefined) continue;
-        const imported = await sandbox.readFile(resolved);
-        if (imported !== null) sources[resolved] = imported;
+      for (const candidates of importedModules(path, content)) {
+        for (const candidate of candidates) {
+          if (sources[candidate] !== undefined) break;
+          const imported = await sandbox.readFile(candidate);
+          if (imported !== null) {
+            sources[candidate] = imported;
+            break;
+          }
+        }
       }
     }
     return sources;
@@ -2169,6 +2172,59 @@ function normalisePath(path: string): string {
 }
 
 /** Resolve a relative import against a directory, without touching the filesystem. */
+/**
+ * The files a source file imports from within the repository, each as the paths it
+ * could resolve to, most likely first. Package imports are left out: they are not
+ * the repository's code.
+ *
+ * JavaScript/TypeScript: ES `import … from './x'`, bare `import './x'` and
+ * CommonJS `require('./x')`. Python: relative `from .x import y` and absolute
+ * `from pkg.mod import y` / `import pkg.mod`, tried from the repository root and
+ * from `src/`, as a module (`mod.py`) or a package (`mod/__init__.py`).
+ */
+export function importedModules(path: string, content: string): string[][] {
+  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const out: string[][] = [];
+  if (path.endsWith('.py')) {
+    const modules = [
+      ...[...content.matchAll(/^\s*from\s+(\.*[\w.]*)\s+import\b/gm)].map((m) => m[1]!),
+      ...[...content.matchAll(/^\s*import\s+([\w.]+(?:\s*,\s*[\w.]+)*)/gm)].flatMap((m) => m[1]!.split(',').map((x) => x.trim())),
+    ];
+    for (const mod of modules) {
+      const dots = /^\.*/.exec(mod)![0].length;
+      const rest = mod.slice(dots).split('.').filter(Boolean).join('/');
+      let bases: string[];
+      if (dots > 0) {
+        const up = dir.split('/').filter(Boolean).slice(0, Math.max(0, dir.split('/').filter(Boolean).length - (dots - 1)));
+        bases = [up.join('/')];
+      } else {
+        bases = ['', 'src'];
+      }
+      const candidates = bases.flatMap((b) => {
+        const stem = [b, rest].filter(Boolean).join('/');
+        return stem ? [`${stem}.py`, `${stem}/__init__.py`] : [];
+      });
+      if (candidates.length) out.push(candidates);
+    }
+    return out;
+  }
+  const specifiers = [
+    ...content.matchAll(/(?:from|import)\s+['"](\.[^'"]+)['"]/g),
+    ...content.matchAll(/require\(\s*['"](\.[^'"]+)['"]\s*\)/g),
+  ].map((m) => m[1]!);
+  for (const spec of specifiers) {
+    const resolved = normaliseRelative(dir, spec);
+    if (!resolved) continue;
+    // A specifier may name the file as written, drop its extension, or name a directory.
+    out.push(
+      /\.[cm]?[jt]sx?$/.test(resolved)
+        ? [resolved, resolved.replace(/\.js$/, '.ts')]
+        : [`${resolved}.ts`, `${resolved}.js`, `${resolved}/index.ts`, `${resolved}/index.js`, resolved],
+    );
+  }
+  return out;
+}
+
 function normaliseRelative(dir: string, specifier: string): string | null {
   const segments = [...dir.split('/').filter(Boolean), ...specifier.split('/')];
   const out: string[] = [];

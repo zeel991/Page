@@ -114,6 +114,11 @@ const NOT_AN_ASSERTION = [
   /Missing script:/i,
   /ERR_UNSUPPORTED_DIR_IMPORT/i,
   /no test files found/i,
+  // Python: a module or dependency that did not import, or pytest not installed.
+  /ModuleNotFoundError/,
+  /ImportError while importing test module/,
+  /No module named pytest/,
+  /^ERROR collecting /m,
 ];
 
 /** Output patterns that show a test assertion was evaluated and failed. */
@@ -125,6 +130,10 @@ const ASSERTION_SIGNALS = [
   /✕|×\s/,
   /Tests\s+\d+\s+failed/i,
   /assert\./,
+  // pytest: an "E   assert ..." explanation, or a FAILED line for a test.
+  /^E\s+(?:assert\b|AssertionError)/m,
+  /^FAILED\s+\S+::/m,
+  /=+ .*\d+ failed.* in [\d.]+s/,
 ];
 
 function emptyAssertionEvidence(): AssertionEvidence {
