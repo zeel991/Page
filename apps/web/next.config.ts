@@ -1,9 +1,8 @@
 import type { NextConfig } from 'next';
 
-const config: NextConfig = {
-  // The dashboard reads through the API rather than the database directly,
-  // because PGlite admits only one process per data directory.
-  env: { PAGER_API_URL: process.env.PAGER_API_URL ?? 'http://127.0.0.1:4000' },
-};
+// PAGER_API_URL is read at runtime, on the console's server only. It is deliberately
+// not listed under `env`: that would bake the build machine's value into the bundle,
+// and a console built once would call whichever API was set when it was built.
+const config: NextConfig = {};
 
 export default config;

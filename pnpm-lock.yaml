@@ -276,6 +276,9 @@ importers:
       '@pager/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
+      '@pager/twin-local':
+        specifier: workspace:*
+        version: link:../../packages/twin-local
 
   evals:
     dependencies:

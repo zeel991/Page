@@ -15,6 +15,7 @@
     "@pager/db": "workspace:*",
     "@pager/observability": "workspace:*",
     "@pager/providers": "workspace:*",
-    "@pager/sandbox": "workspace:*"
+    "@pager/sandbox": "workspace:*",
+    "@pager/twin-local": "workspace:*"
   }
 }

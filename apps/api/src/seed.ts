@@ -48,6 +48,7 @@ import {
   IncidentInvestigator,
   IncidentWorkflow,
   ModelPatchGenerator,
+  SCRIPTS,
   ScriptedPatchGenerator,
   describeModelAvailability,
   modelFromEnv,
@@ -55,7 +56,6 @@ import {
 } from '@pager/agents';
 import { FIXTURES, LocalTwinServer, fixture, seedFromFixture } from '@pager/twin-local';
 import { DEFAULT_DATABASE_URL, openDatabase } from './db.ts';
-import { SCRIPTS } from './seed-scripts.ts';
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const ids = requested.length > 0 ? requested : Object.keys(FIXTURES);

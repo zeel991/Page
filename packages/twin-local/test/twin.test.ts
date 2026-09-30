@@ -37,6 +37,22 @@ async function github(): Promise<GitHubProvider> {
 }
 
 describe('local GitHub twin', () => {
+  it('exchanges a sign-in code with the client authenticated by HTTP Basic, as OAuth libraries send it', async () => {
+    const creds = await registerViaManifest(endpoints.github, PAGER_APP_MANIFEST(endpoints.github));
+    const authorize = await fetch(`${endpoints.github}/login/oauth/authorize?redirect_uri=${encodeURIComponent('http://console.test/cb')}`, { redirect: 'manual' });
+    const code = new URL(authorize.headers.get('location')!).searchParams.get('code')!;
+    const basic = Buffer.from(`${encodeURIComponent(creds.clientId!)}:${encodeURIComponent(creds.clientSecret!)}`).toString('base64');
+    const res = await fetch(`${endpoints.github}/login/oauth/access_token`, {
+      method: 'POST',
+      headers: { accept: 'application/json', authorization: `Basic ${basic}`, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: 'http://console.test/cb' }),
+    });
+    const body = (await res.json()) as { access_token?: string; error?: string };
+    expect(body.error).toBeUndefined();
+    const user = await fetch(`${endpoints.github}/user`, { headers: { authorization: `Bearer ${body.access_token}` } });
+    expect(await user.json()).toMatchObject({ id: 1001, login: 'octo' });
+  });
+
   it('completes the GitHub App manifest and installation token flow', async () => {
     const creds = await registerViaManifest(endpoints.github, PAGER_APP_MANIFEST(endpoints.github));
     expect(creds.privateKeyPem).toContain('PRIVATE KEY');

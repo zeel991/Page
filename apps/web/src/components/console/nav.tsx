@@ -4,11 +4,14 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 export const CONSOLE_NAV = [
+  ['Setup', '/onboarding', '00'],
   ['Overview', '/dashboard', '01'],
   ['Incidents', '/incidents', '02'],
   ['Deployments', '/deployments', '03'],
   ['Agent Runs', '/agent-runs', '04'],
-  ['Policies', '/policies', '05'],
+  ['Services', '/services', '05'],
+  ['Settings', '/settings', '06'],
+  ['Policies', '/policies', '07'],
 ] as const;
 
 const ROW = 40;

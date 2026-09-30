@@ -13,6 +13,8 @@ import {
 import { deploymentFromRevision, probeDeployedRevision, type TimeRange } from '@pager/providers';
 import type { SandboxRunner } from '@pager/sandbox';
 import { decideRecoveryWindow } from './recovery-window.ts';
+import { runSampleIncident } from './sample-incident.ts';
+import { PlanRepository } from '@pager/db';
 import { TenantUnavailable, tenantFor, type OperatorServices, type Tenant } from './tenant.ts';
 
 /**
@@ -87,6 +89,8 @@ export async function handle(c: JobContext, job: JobRow): Promise<JobOutcome> {
       return awaitMerge(c, job);
     case 'verify_recovery':
       return verifyRecovery(c, job);
+    case 'test_incident':
+      return { kind: 'done', result: await runSampleIncident(c.op.db, job, c.sandboxRunner) };
     default:
       return { kind: 'blocked', reason: `unknown job kind ${job.kind}` };
   }
@@ -146,6 +150,16 @@ async function poll(c: JobContext, job: JobRow): Promise<JobOutcome> {
   }
   if (!alert.escalate) {
     await record(`not escalated: ${alert.rationale}`);
+    return { kind: 'reschedule', at: next };
+  }
+
+  // The plan's monthly incident allowance. Checked before anything is recorded, so a
+  // later poll opens the incident once the month turns or the plan changes.
+  const plans = new PlanRepository(c.op.db);
+  const plan = await plans.forOrganization(tenant.service.organizationId);
+  const used = await plans.incidentsThisMonth(tenant.service.organizationId, now(c));
+  if (used >= plan.maxIncidentsPerMonth) {
+    await record(`NOT INVESTIGATING: an incident is live, but the ${plan.name} plan's ${plan.maxIncidentsPerMonth} incidents this month are used`);
     return { kind: 'reschedule', at: next };
   }
 

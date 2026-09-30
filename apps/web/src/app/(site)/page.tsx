@@ -101,8 +101,8 @@ export default function LandingPage() {
                   {label}
                 </a>
               ))}
-              <Link href="/dashboard" className="eyebrow rounded-full border border-paper/60 px-4 py-2 hover:bg-paper hover:text-signal">
-                Dashboard
+              <Link href="/signin" className="eyebrow rounded-full border border-paper/60 px-4 py-2 hover:bg-paper hover:text-signal">
+                Sign up
               </Link>
             </nav>
             <details className="relative md:hidden">
@@ -114,7 +114,7 @@ export default function LandingPage() {
                 </span>
               </summary>
               <div className="absolute right-0 z-20 mt-3 w-48 rounded-md bg-carbon p-2 text-paper shadow-xl">
-                {[...NAV, ['Dashboard', '/dashboard'] as const].map(([label, href]) => (
+                {[...NAV, ['Sign up', '/signin'] as const].map(([label, href]) => (
                   <a key={href} href={href} className="eyebrow block rounded px-3 py-2 hover:bg-graphite">
                     {label}
                   </a>
@@ -140,10 +140,10 @@ export default function LandingPage() {
               </div>
             </div>
             <div className="col-span-5 flex items-center justify-center md:col-span-2">
-              <CircleLink href="/dashboard" size="lg">
-                Open
+              <CircleLink href="/signin" size="lg">
+                Sign up with
                 <br />
-                dashboard
+                GitHub
               </CircleLink>
             </div>
             <div className="col-span-1 hidden justify-end md:col-span-2 md:flex">
@@ -316,10 +316,10 @@ export default function LandingPage() {
             <SectionLabel className="mb-4">Alert to postmortem</SectionLabel>
             <h2 className="display text-[clamp(64px,12vw,190px)]">The loop</h2>
           </div>
-          <CircleLink href="/dashboard" tone="ink">
-            See it
+          <CircleLink href="/signin" tone="ink">
+            Sign up with
             <br />
-            live
+            GitHub
           </CircleLink>
         </div>
 
@@ -460,7 +460,7 @@ export default function LandingPage() {
             <div className="col-span-6 border-l border-paper/20 py-8 pl-5 md:col-span-3 md:pl-8">
               <div className="eyebrow text-paper/60">Go</div>
               <ul className="mt-5 space-y-2 text-[15px]">
-                <li><Link href="/dashboard" className="hover:text-signal">Dashboard →</Link></li>
+                <li><Link href="/signin" className="hover:text-signal">Sign up with GitHub →</Link></li>
                 <li><a href={LINKS.live} target="_blank" rel="noreferrer" className="hover:text-signal">Live worker ↗</a></li>
                 <li><a href={LINKS.demo} target="_blank" rel="noreferrer" className="hover:text-signal">Demo video ↗</a></li>
                 <li><a href={LINKS.postmortem} target="_blank" rel="noreferrer" className="hover:text-signal">Postmortem ↗</a></li>

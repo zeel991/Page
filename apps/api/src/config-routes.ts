@@ -5,8 +5,14 @@ import {
   InstallationRepository,
   IntegrationRepository,
   ServiceConfigRepository,
+  JobQueue,
+  PlanRepository,
   SlackRepository,
   UsageRepository,
+  jobs,
+  and,
+  eq,
+  desc,
   type CredentialVault,
   type Database,
   type IntegrationProvider,
@@ -233,8 +239,18 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
     return problems;
   }
 
+  const plans = new PlanRepository(deps.db);
+  const queue = new JobQueue(deps.db, { workerId: 'api' });
+
   app.post('/api/services', async (request, reply) => {
     if (!requireRole(request, reply, ['owner', 'admin'])) return reply;
+    {
+      const o = org(request);
+      const plan = await plans.forOrganization(o);
+      if ((await plans.servicesUsed(o)) >= plan.maxServices) {
+        return reply.code(402).send({ error: 'plan_limit', reason: `The ${plan.name} plan watches ${plan.maxServices} service(s).` });
+      }
+    }
     const { config, problems } = serviceConfigProblems(request.body, { allowInsecureHealthUrl: policy.allowPrivateHealthUrl ?? false });
     if (!config) return reply.code(422).send({ problems });
     const o = org(request);
@@ -272,6 +288,64 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
     const result: ConnectionResult = probe.sha ? { ok: true, detail: `reports revision ${probe.sha.slice(0, 12)}` } : { ok: false, error: probe.problem ?? 'no revision' };
     await services.recordHealthTest(o, svc.id, result.ok ? { ok: true } : { ok: false, error: result.error });
     return { result };
+  });
+
+  // ── Onboarding: each step's real state, read from what exists ───────────────
+  app.get('/api/onboarding', async (request) => {
+    const o = org(request);
+    const [installs, repos, dd, slackRow, svcs, usageNow, sampleJob] = await Promise.all([
+      installations.active(o),
+      installations.repositories(o),
+      integrations.get(o, 'datadog'),
+      slack.forOrganization(o),
+      services.list(o),
+      plans.usage(o),
+      deps.db.select().from(jobs).where(and(eq(jobs.organizationId, o), eq(jobs.kind, 'test_incident'))).orderBy(desc(jobs.createdAt)).limit(1),
+    ]);
+    const watched = svcs.filter((s) => s.alertSource !== 'sample');
+    const service = watched[0] ?? null;
+    const polledRecently =
+      service?.lastPolledAt && Date.now() - service.lastPolledAt.getTime() < 3 * service.intervalSeconds * 1000;
+    const step = (id: string, label: string, status: 'done' | 'todo' | 'attention', detail: string | null = null) => ({ id, label, status, detail });
+    return {
+      steps: [
+        step('signed_in', 'Signed in with GitHub', 'done'),
+        step('github', 'Install the GitHub App', installs.length ? 'done' : 'todo', installs.map((i) => i.accountLogin).join(', ') || null),
+        step('repository', 'Pick a repository', repos.some((r) => !r.detachedAt) ? 'done' : 'todo', repos.filter((r) => !r.detachedAt).map((r) => r.fullName).join(', ') || null),
+        step(
+          'datadog',
+          'Connect Datadog',
+          !dd ? 'todo' : dd.verifiedAt ? 'done' : 'attention',
+          !dd ? null : dd.verifiedAt ? `verified ${dd.verifiedAt.toISOString()}` : dd.lastError ?? 'connected, not yet tested',
+        ),
+        step('slack', 'Connect Slack', slackRow ? 'done' : 'todo', slackRow?.teamName ?? null),
+        step('service', 'Add a service', service ? 'done' : 'todo', service ? `${service.name} → ${service.slackChannelName ?? service.slackChannelId}` : null),
+        step(
+          'health',
+          'Check the health URL reports a revision',
+          !service ? 'todo' : service.healthVerifiedAt ? 'done' : 'attention',
+          service?.healthLastError ?? (service?.healthVerifiedAt ? 'reports a revision' : null),
+        ),
+        step(
+          'watching',
+          'Being watched',
+          !service ? 'todo' : polledRecently ? 'done' : 'attention',
+          service?.lastPollOutcome ?? (service ? 'waiting for the first poll' : null),
+        ),
+      ],
+      plan: usageNow,
+      testIncident: sampleJob[0]
+        ? { status: sampleJob[0].status, result: sampleJob[0].result, error: sampleJob[0].lastError, at: sampleJob[0].createdAt }
+        : null,
+    };
+  });
+
+  /** Run the sample incident for this workspace. One at a time. */
+  app.post('/api/test-incident', async (request, reply) => {
+    if (!requireRole(request, reply, ['owner', 'admin'])) return reply;
+    const o = org(request);
+    const job = await queue.enqueue({ organizationId: o, kind: 'test_incident', dedupeKey: `test_incident:${o}`, maxAttempts: 1 });
+    return job ? { queued: job.id } : reply.code(409).send({ error: 'already_running', reason: 'A test incident is already queued or running.' });
   });
 }
 

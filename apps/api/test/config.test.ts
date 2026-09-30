@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { eq, plans } from '@pager/db';
 import { harness, healthServer, installThroughGitHub, installThroughSlack, onboard, type Harness } from './harness.ts';
 
 let h: Harness;
@@ -52,6 +53,12 @@ describe('integrations', () => {
 });
 
 describe('services', () => {
+  // These are about validation: room for more services than the free plan allows,
+  // so a refusal here is the validator's, never the plan limit's (onboarding.test.ts).
+  beforeEach(async () => {
+    await h.handle.db.update(plans).set({ maxServices: 10 }).where(eq(plans.id, 'free'));
+  });
+
   it('saves a service only when everything it names exists in the workspace', async () => {
     const { session, service } = await onboard(h, { healthUrl: health.url });
     const list = (await h.call('GET', '/api/services', session.token)).json() as { services: { id: string; enabled: boolean; slackChannelId: string }[] };

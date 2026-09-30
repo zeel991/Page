@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { signIn } from '@/auth';
 import { Wordmark } from '@/components/site/primitives';
+import { sameSitePath } from '@/lib/same-site-path';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,8 +11,7 @@ export const dynamic = 'force-dynamic';
  */
 export default async function SignInPage({ searchParams }: { searchParams: Promise<{ callbackUrl?: string }> }) {
   const { callbackUrl } = await searchParams;
-  // Only same-site paths: a callback URL from a query string is attacker-chosen.
-  const target = callbackUrl && callbackUrl.startsWith('/') && !callbackUrl.startsWith('//') ? callbackUrl : '/onboarding';
+  const target = sameSitePath(callbackUrl) ?? '/onboarding';
   return (
     <main className="flex min-h-screen items-center justify-center bg-carbon px-4">
       <div className="w-full max-w-md border border-graphite bg-ink p-8">

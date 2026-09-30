@@ -27,6 +27,33 @@ export class ApiUnavailableError extends Error {
  * were removed from the workspace.
  */
 export async function api<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+  const { res, url } = await send(path, init);
+  if (!res.ok) {
+    if (res.status === 404) throw new Error('not-found');
+    throw new Error(`${url} responded ${res.status}`);
+  }
+  return (await res.json()) as T;
+}
+
+/** An API answer a form shows to the person, refusals included. */
+export interface ApiResult<T> {
+  ok: boolean;
+  status: number;
+  body: T & { error?: string; reason?: string; problems?: Record<string, string> };
+}
+
+/**
+ * Like `api`, but a refusal is returned rather than thrown: forms and install
+ * callbacks show the API's own reason ("the Slack bot cannot see this channel")
+ * instead of a generic failure.
+ */
+export async function apiCall<T = Record<string, unknown>>(path: string, init: { method?: string; body?: unknown } = {}): Promise<ApiResult<T>> {
+  const { res } = await send(path, init);
+  const body = (await res.json().catch(() => ({}))) as ApiResult<T>['body'];
+  return { ok: res.ok, status: res.status, body };
+}
+
+async function send(path: string, init: { method?: string; body?: unknown }): Promise<{ res: Response; url: string }> {
   const session = await auth();
   if (!session?.userId || !session.organizationId) redirect('/signin');
   const url = `${BASE}${path}`;
@@ -45,11 +72,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     throw new ApiUnavailableError(url, err);
   }
   if (res.status === 401) redirect('/signin');
-  if (!res.ok) {
-    if (res.status === 404) throw new Error('not-found');
-    throw new Error(`${url} responded ${res.status}`);
-  }
-  return (await res.json()) as T;
+  return { res, url };
 }
 
 export interface IncidentRow {

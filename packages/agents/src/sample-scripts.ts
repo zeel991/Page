@@ -1,5 +1,6 @@
 /**
- * Patches supplied to the scripted generator when seeding.
+ * Patches supplied to the scripted generator for the seed and for "Send a test
+ * incident" — the one scenario a new workspace can run without any integration.
  *
  * These exist to exercise the pipeline around code authorship so the dashboard has
  * a complete incident to show. They are NOT the agent solving anything: every

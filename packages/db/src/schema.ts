@@ -47,14 +47,29 @@ export const approvalDecisionEnum = pgEnum('approval_decision', [
 /** What a member may do in a workspace. Only owners and admins may merge from Slack. */
 export const membershipRoleEnum = pgEnum('membership_role', ['owner', 'admin', 'member']);
 
+/**
+ * What a workspace's plan allows. Enforced by the API (services) and the worker
+ * (incidents per month, and the model budget when the operator's key pays).
+ * Billing is not wired: a plan is assigned, not bought.
+ */
+export const plans = pgTable('plans', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  maxServices: integer('max_services').notNull(),
+  maxIncidentsPerMonth: integer('max_incidents_per_month').notNull(),
+  /** Model spend covered when the workspace uses the operator's key. Null: none. */
+  includedModelUsd: doublePrecision('included_model_usd'),
+});
+
 export const organizations = pgTable('organizations', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
   /** Autonomy ceiling for this org. Raising it is an explicit operator act. */
   autonomyLevel: text('autonomy_level').notNull().default('L3'),
-  /** Monthly model spend cap in USD. Null: the plan's default applies (item 8). */
+  /** Monthly model spend cap in USD. Null: the plan's included spend applies. */
   monthlyBudgetUsd: doublePrecision('monthly_budget_usd'),
+  planId: text('plan_id').notNull().default('free').references(() => plans.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

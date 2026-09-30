@@ -15,7 +15,7 @@
  */
 import { createServer } from 'node:http';
 import { LocalKeyWrapper, redactSecrets, registerSecret } from '@pager/core';
-import { CredentialVault, JobQueue, UsageRepository, createDatabase, isPgliteUrl, migrate } from '@pager/db';
+import { CredentialVault, JobQueue, PlanRepository, UsageRepository, createDatabase, isPgliteUrl, migrate } from '@pager/db';
 import { githubAppFromEnv } from '@pager/providers';
 import { AnthropicModel, IncidentInvestigator, MeteredModel, ModelPatchGenerator } from '@pager/agents';
 import { usageMeter } from './meter.ts';
@@ -47,8 +47,12 @@ async function main(): Promise<void> {
 
   const vault = new CredentialVault(handle.db, new LocalKeyWrapper(config.masterKey));
   const usage = new UsageRepository(handle.db);
-  // A workspace's own cap when it set one. Plan defaults arrive with plans.
-  const budgetFor = async (organizationId: string, _operatorKey: boolean) => usage.budget(organizationId);
+  const plans = new PlanRepository(handle.db);
+  // A workspace's own cap when it set one; otherwise, when the operator's key is
+  // paying, the plan's included spend. A workspace's own key with no cap is uncapped:
+  // it is the workspace's money.
+  const budgetFor = async (organizationId: string, operatorKey: boolean) =>
+    (await usage.budget(organizationId)) ?? (operatorKey ? (await plans.forOrganization(organizationId)).includedModelUsd : null);
   const queue = new JobQueue(handle.db, { workerId: config.workerId, maxRunning: config.maxRunningJobs });
   const ctx: JobContext = {
     op: {

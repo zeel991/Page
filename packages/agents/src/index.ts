@@ -17,3 +17,4 @@ export * from './model-patch-generator.js';
 export * from './workflow.js';
 export * from './model/pricing.js';
 export * from './model/metered-model.js';
+export * from './sample-scripts.js';

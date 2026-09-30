@@ -337,7 +337,13 @@ export function githubRoutes(): Route[] {
       pattern: /^\/login\/oauth\/access_token$/,
       handler: (ctx) => {
         const body = { ...(ctx.json as Record<string, string> | null ?? {}), ...Object.fromEntries(ctx.form) } as Record<string, string>;
-        const app = [...ctx.state.apps.values()].find((a) => a.clientId === body.client_id && a.clientSecret === body.client_secret);
+        // GitHub takes the client credentials in the body or as HTTP Basic; OAuth
+        // libraries (Auth.js among them) default to Basic.
+        const basic = /^Basic\s+(.+)$/i.exec(ctx.headers.authorization ?? '')?.[1];
+        const [basicId, basicSecret] = basic ? Buffer.from(basic, 'base64').toString('utf8').split(':').map(decodeURIComponent) : [];
+        const clientId = body.client_id ?? basicId;
+        const clientSecret = body.client_secret ?? basicSecret;
+        const app = [...ctx.state.apps.values()].find((a) => a.clientId === clientId && a.clientSecret === clientSecret);
         // GitHub answers these with 200 and an error field, not an HTTP error.
         if (!app) return { status: 200, body: { error: 'incorrect_client_credentials' } };
         const userId = body.code ? ctx.state.oauthCodes.get(body.code) : undefined;
