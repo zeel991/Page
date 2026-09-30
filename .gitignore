@@ -10,3 +10,6 @@ coverage/
 sandboxes/
 .arga-run
 .next/
+
+# The worker host settings hold secrets.
+deploy/worker/worker.env

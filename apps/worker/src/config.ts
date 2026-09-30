@@ -20,7 +20,9 @@ export interface OperatorConfig {
   /** The operator's model key, used by workspaces that have not brought their own. */
   operatorAnthropicKey: string | null;
   model: string;
-  sandbox: { runner: 'local' } | { runner: 'docker'; image: string };
+  sandbox:
+    | { runner: 'local'; root: string | undefined }
+    | { runner: 'docker'; image: string; runtime: string | undefined; root: string | undefined };
   /** Where installed dependency trees are cached between incidents, by lockfile hash. */
   dependencyCacheDir: string;
   /** Jobs this process runs at once, and jobs all processes together may run. */
@@ -55,8 +57,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OperatorConfig
   if (!databaseUrl) problems.push('DATABASE_URL is required');
   const masterKey = env.PAGER_MASTER_KEY?.trim() ?? '';
   if (Buffer.from(masterKey, 'base64').length !== 32) problems.push('PAGER_MASTER_KEY must be 32 bytes, base64');
-  const runner = env.PAGER_SANDBOX_RUNNER?.trim();
-  if (runner && runner !== 'docker' && runner !== 'local') problems.push(`PAGER_SANDBOX_RUNNER must be docker or local (got "${runner}")`);
+  const runner = env.PAGER_SANDBOX_RUNNER?.trim() || 'local';
+  if (runner !== 'docker' && runner !== 'local') problems.push(`PAGER_SANDBOX_RUNNER must be docker or local (got "${runner}")`);
+  // The local runner starts repository code as this process's own user, and a
+  // process can read its parent's environment (/proc/<pid>/environ): the master key,
+  // the database URL and the GitHub App's key, which together reach every workspace.
+  // So against a real database it is refused unless the operator says every
+  // workspace is trusted. An in-process development database has no tenants to lose.
+  const development = databaseUrl.startsWith('pglite://');
+  if (runner === 'local' && databaseUrl && !development && env.PAGER_ALLOW_LOCAL_SANDBOX !== '1') {
+    problems.push(
+      'PAGER_SANDBOX_RUNNER is local (or unset) against a real database. Repository code would run as this ' +
+        "worker's user and could read its credentials. Set PAGER_SANDBOX_RUNNER=docker (see deploy/worker), or " +
+        'PAGER_ALLOW_LOCAL_SANDBOX=1 only if every workspace on this deployment is trusted',
+    );
+  }
+  const image = env.PAGER_SANDBOX_IMAGE?.trim() || '';
+  if (runner === 'docker' && !image) problems.push('PAGER_SANDBOX_IMAGE is required with the docker sandbox (build docker/sandbox.Dockerfile)');
+  const sandboxRoot = env.PAGER_SANDBOX_ROOT?.trim() || undefined;
 
   const config: OperatorConfig = {
     databaseUrl,
@@ -65,7 +83,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OperatorConfig
     slackBaseUrl: env.PAGER_SLACK_URL?.trim() || 'https://slack.com',
     operatorAnthropicKey: env.ANTHROPIC_API_KEY?.trim() || null,
     model: env.PAGER_MODEL?.trim() || 'claude-opus-5',
-    sandbox: runner === 'docker' ? { runner: 'docker', image: env.PAGER_SANDBOX_IMAGE?.trim() || 'node:22-bookworm-slim' } : { runner: 'local' },
+    sandbox:
+      runner === 'docker'
+        ? { runner: 'docker', image, runtime: env.PAGER_SANDBOX_DOCKER_RUNTIME?.trim() || undefined, root: sandboxRoot }
+        : { runner: 'local', root: sandboxRoot },
     dependencyCacheDir: env.PAGER_DEPENDENCY_CACHE?.trim() || join(tmpdir(), 'pager-dependency-cache'),
     concurrency: int(env, 'PAGER_WORKER_CONCURRENCY', 2, 1, 64, problems),
     maxRunningJobs: int(env, 'PAGER_MAX_RUNNING_JOBS', 4, 1, 1024, problems),
@@ -90,8 +111,8 @@ export function describeConfig(config: OperatorConfig): string {
     `health URLs    ${config.allowPrivateHealthUrl ? 'PRIVATE ADDRESSES ALLOWED — local drills only' : 'public https only'}`,
     `sandbox        ${
       config.sandbox.runner === 'docker'
-        ? `docker (${config.sandbox.image}) — no network, read-only root, non-root, resource-limited`
-        : 'LOCAL PROCESS — DEVELOPMENT ONLY: repository code runs on this host as this user'
+        ? `docker (${config.sandbox.image}${config.sandbox.runtime ? `, runtime ${config.sandbox.runtime}` : ''}) — no network, read-only root, non-root, resource-limited`
+        : 'LOCAL PROCESS — TRUSTED WORKSPACES ONLY: repository code runs on this host as this user'
     }`,
   ].join('\n  ');
 }

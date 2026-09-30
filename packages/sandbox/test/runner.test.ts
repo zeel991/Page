@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { DockerRunner, LocalProcessRunner, dockerRunArgs, repositoryPath, type RunSpec } from '../src/runner.js';
+import { DockerRunner, LocalProcessRunner, containerUser, dockerRunArgs, repositoryPath, type RunSpec } from '../src/runner.js';
 
 /**
  * DockerRunner is tested against the command it builds, because this machine has
@@ -24,7 +24,7 @@ const spec: RunSpec = {
 const pair = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
 
 describe('dockerRunArgs', () => {
-  const args = dockerRunArgs(spec, { image: 'node:22-bookworm-slim' }, 'pager-sandbox-abc');
+  const args = dockerRunArgs(spec, { image: 'node:22-bookworm-slim', user: '1000:1000' }, 'pager-sandbox-abc');
 
   it('has no network unless the step asks for it', () => {
     expect(pair(args, '--network')).toBe('none');
@@ -33,7 +33,7 @@ describe('dockerRunArgs', () => {
 
   it('runs read-only, unprivileged and limited', () => {
     expect(args).toContain('--read-only');
-    expect(pair(args, '--user')).toBe('10001:10001');
+    expect(pair(args, '--user')).toBe('1000:1000');
     expect(pair(args, '--cap-drop')).toBe('ALL');
     expect(pair(args, '--security-opt')).toBe('no-new-privileges');
     expect(pair(args, '--pids-limit')).toBe('512');
@@ -41,10 +41,19 @@ describe('dockerRunArgs', () => {
     expect(pair(args, '--cpus')).toBe('2');
   });
 
-  it('mounts only the working copy, at /work', () => {
-    expect(args).toContain('type=bind,source=/sandboxes/pager-sandbox-1/work,target=/work');
-    expect(args.filter((a) => a.startsWith('type=bind'))).toHaveLength(1);
+  it('mounts only the sandbox’s own directories: the working copy, its home and its temp', () => {
+    expect(args.filter((a) => a.startsWith('type=bind'))).toEqual([
+      'type=bind,source=/sandboxes/pager-sandbox-1/work,target=/work',
+      'type=bind,source=/sandboxes/pager-sandbox-1/home,target=/home/sandbox',
+      'type=bind,source=/sandboxes/pager-sandbox-1/tmp,target=/tmp',
+    ]);
     expect(pair(args, '--workdir')).toBe('/work');
+  });
+
+  it('runs an init as pid 1, and a stronger runtime when one is configured', () => {
+    expect(args).toContain('--init');
+    expect(args).not.toContain('--runtime');
+    expect(pair(dockerRunArgs(spec, { image: 'i', user: '1:1', runtime: 'runsc' }, 'n'), '--runtime')).toBe('runsc');
   });
 
   it('passes the allow-listed environment and nothing of the host', () => {
@@ -55,6 +64,22 @@ describe('dockerRunArgs', () => {
 
   it('ends with the image and the command, as separate arguments', () => {
     expect(args.slice(-4)).toEqual(['node:22-bookworm-slim', 'node', '--test', 'test/a.test.ts']);
+  });
+});
+
+describe('containerUser', () => {
+  // The bind-mounted working copy belongs to the worker's user. A container running
+  // as a fixed uid 10001 could not write node_modules, .venv or a patch into it.
+  it('is the worker’s own uid:gid, so the mounted sandbox is writable', () => {
+    expect(containerUser({ uid: 1001, gid: 118 })).toBe('1001:118');
+  });
+
+  it('refuses root', () => {
+    expect(() => containerUser({ uid: 0, gid: 0 })).toThrow(/not run repository code as root/);
+  });
+
+  it('keys installs by image, not only by runner kind', () => {
+    expect(new DockerRunner({ image: 'pager-sandbox:1', user: '1:1' }).cacheScope).not.toBe(new DockerRunner({ image: 'pager-sandbox:2', user: '1:1' }).cacheScope);
   });
 });
 

@@ -35,6 +35,8 @@ export interface JobContext {
   op: OperatorServices;
   queue: JobQueue;
   sandboxRunner: SandboxRunner;
+  /** Parent directory for sandboxes; the OS temp directory when unset. */
+  sandboxRoot?: string;
   /** Installed dependency trees shared between incidents, by lockfile hash. */
   dependencyCache?: DependencyCache | null;
   /**
@@ -235,6 +237,7 @@ async function runIncident(c: JobContext, job: JobRow): Promise<JobOutcome> {
       incidentKey,
       ...(run.failureKey ? { failureKey: run.failureKey } : {}),
       ...(tenant.emailRecipients.length ? { teamEmails: tenant.emailRecipients } : {}),
+      ...(c.sandboxRoot ? { sandboxRoot: c.sandboxRoot } : {}),
       resume,
       onCheckpoint: async (cp) => {
         if (cp.incidentId) currentIncident = cp.incidentId;

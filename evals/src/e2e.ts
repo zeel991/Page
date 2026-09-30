@@ -33,7 +33,7 @@ import {
 } from '@pager/providers';
 import { AgentTracer, InMemorySink } from '@pager/observability';
 import { IncidentWorkflow, SCRIPTS, ScriptedPatchGenerator } from '@pager/agents';
-import { DirectoryDependencyCache } from '@pager/sandbox';
+import { DirectoryDependencyCache, DockerRunner, type SandboxRunner } from '@pager/sandbox';
 import { FIXTURES, LocalTwinServer, seedFromFixture, type ScenarioFixture } from '@pager/twin-local';
 
 export type AlertSourceName = 'datadog' | 'sentry';
@@ -58,6 +58,17 @@ export interface E2eRow {
 const SCENARIO_NOW = new Date('2026-09-13T15:10:00Z');
 
 /**
+ * Where repository code runs: on this host by default, or in the production sandbox
+ * with PAGER_SANDBOX_RUNNER=docker and PAGER_SANDBOX_IMAGE (CI's sandbox-docker job).
+ */
+function sandboxRunnerFromEnv(): SandboxRunner | undefined {
+  if (process.env.PAGER_SANDBOX_RUNNER !== 'docker') return undefined;
+  const image = process.env.PAGER_SANDBOX_IMAGE?.trim();
+  if (!image) throw new Error('PAGER_SANDBOX_RUNNER=docker needs PAGER_SANDBOX_IMAGE (build docker/sandbox.Dockerfile)');
+  return new DockerRunner({ image });
+}
+
+/**
  * Metrics always come from the Datadog twin; what differs is where the incident is
  * noticed. With Sentry that is its issues and events — a real configuration, since
  * Sentry has no request metrics of ours.
@@ -78,6 +89,7 @@ export async function runOne(id: string, source: AlertSourceName, cacheDir: stri
   const script = SCRIPTS[id];
   if (!script) throw new Error(`no scripted fix for ${id}`);
 
+  const sandboxRunner = sandboxRunnerFromEnv();
   const server = new LocalTwinServer({ now: () => Date.parse('2026-09-13T14:45:00Z') });
   server.seed(seedFromFixture(fixture));
   const e = await server.start();
@@ -96,6 +108,7 @@ export async function runOne(id: string, source: AlertSourceName, cacheDir: stri
       now: () => SCENARIO_NOW,
       patchGenerator: new ScriptedPatchGenerator(script),
       dependencyCache: new DirectoryDependencyCache(cacheDir),
+      ...(sandboxRunner ? { sandboxRunner } : {}),
     });
 
     const tip = (await sourceControl.listCommits(fixture.repository, { limit: 1 }))[0]!;

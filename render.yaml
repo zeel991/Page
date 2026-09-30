@@ -1,4 +1,5 @@
-# Pager Developer on Render: console (web), API, worker and Postgres.
+# Pager Developer on Render: the API and Postgres (and optionally the console, which
+# also deploys to Vercel). The worker runs on a Docker host: deploy/worker.
 #
 # Everything a workspace configures (repositories, Datadog, Slack, services) lives in
 # the database and is set from the console. What is set here is the operator's: the
@@ -7,12 +8,14 @@
 # is documented in .env.example.
 #
 # Migrations run once per API deploy, before it starts (preDeployCommand). The worker
-# does not migrate: deploy the API first when a release adds one.
+# does not migrate: deploy the API first when a release adds one. docs/launch.md is
+# the whole sequence.
 
 envVarGroups:
   # Generated once and shared. PAGER_SESSION_SECRET must be identical in the console
   # and the API; PAGER_MASTER_KEY in the API and the worker (it unwraps tenant
-  # secrets). Render generates 256 random bits, base64 — the 32 bytes the key needs.
+  # secrets), so copy it into the worker host's worker.env. Render generates 256
+  # random bits, base64 — the 32 bytes the key needs.
   - name: pager-secrets
     envVars:
       - key: PAGER_SESSION_SECRET
@@ -23,7 +26,10 @@ envVarGroups:
 databases:
   - name: pager-db
     postgresMajorVersion: "17"
-    # Reachable only from this account's services, never the public internet.
+    # Reachable from this account's services and, once added, the worker host only:
+    #   ipAllowList:
+    #     - source: <worker host IP>/32
+    #       description: pager worker
     ipAllowList: []
 
 services:
@@ -96,51 +102,7 @@ services:
         sync: false
 
   # ── Worker ───────────────────────────────────────────────────────────────────
-  # A web service rather than a background worker because Slack posts merge clicks
-  # to it (/slack/interactions); /health and /status report the queue.
-  - type: web
-    name: pager-worker
-    runtime: node
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm -r --filter './packages/**' build
-    startCommand: pnpm --filter @pager/worker start
-    healthCheckPath: /health
-    envVars:
-      - key: NODE_VERSION
-        value: "22"
-      - fromGroup: pager-secrets
-      - key: DATABASE_URL
-        fromDatabase:
-          name: pager-db
-          property: connectionString
-      - key: GITHUB_APP_ID
-        sync: false
-      - key: GITHUB_APP_PRIVATE_KEY
-        sync: false
-      - key: GITHUB_APP_SLUG
-        sync: false
-      - key: GITHUB_APP_CLIENT_ID
-        sync: false
-      - key: GITHUB_APP_CLIENT_SECRET
-        sync: false
-      - key: GITHUB_APP_WEBHOOK_SECRET
-        sync: false
-      # Verifies merge clicks. Without it no merge button is offered.
-      - key: SLACK_SIGNING_SECRET
-        sync: false
-      # Optional: the operator's model key, for workspaces that bring none. Their
-      # spend is capped at the plan's included amount unless they set a budget.
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: PAGER_MODEL
-        value: claude-opus-5
-      - key: PAGER_WORKER_CONCURRENCY
-        value: "2"
-      - key: PAGER_MAX_RUNNING_JOBS
-        value: "4"
-      # Render runs no Docker daemon, so the container sandbox is unavailable here
-      # and repository code (tests, patches) runs as a child process of the worker.
-      # That is acceptable for repositories you own; it is NOT isolation between
-      # tenants. For untrusted workspaces, run the worker on a host with a Docker
-      # daemon and set PAGER_SANDBOX_RUNNER=docker.
-      - key: PAGER_SANDBOX_RUNNER
-        value: local
+  # Not on Render. The worker runs repository code, and open sign-up needs that code
+  # in containers, which need a Docker daemon Render does not offer. It runs on a
+  # Docker host instead: deploy/worker/compose.yaml. Add that host's IP to pager-db's
+  # ipAllowList above so it can reach the database.

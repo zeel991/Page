@@ -193,7 +193,7 @@ export async function installDependencies(sandbox: Sandbox, profile: RepositoryP
   // Installed trees contain native binaries, so the platform and the runner (host
   // or container) are part of what makes two installs interchangeable.
   const cacheKey = createHash('sha256')
-    .update([plan.manager, plan.command, ...plan.args, process.platform, process.arch, sandbox.runner.kind].join('\0'))
+    .update([plan.manager, plan.command, ...plan.args, process.platform, process.arch, sandbox.runner.cacheScope ?? sandbox.runner.kind].join('\0'))
     .update('\0')
     .update(lockBytes)
     .digest('hex')
