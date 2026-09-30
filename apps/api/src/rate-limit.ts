@@ -30,8 +30,10 @@ export interface RateDecision {
 export class RateLimiter {
   private readonly windows = new Map<string, { start: number; count: number }>();
   private readonly now: () => number;
+  readonly opts: RateLimitOptions;
 
-  constructor(readonly opts: RateLimitOptions) {
+  constructor(opts: RateLimitOptions) {
+    this.opts = opts;
     this.now = opts.now ?? Date.now;
   }
 
