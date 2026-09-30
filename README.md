@@ -6,86 +6,136 @@
   and hands a human a reviewable pull request with the evidence attached.
 </p>
 
+<p align="center">
+  <a href="https://github.com/zeel991/Page/actions/workflows/ci.yml"><img src="https://github.com/zeel991/Page/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
+</p>
+
 ---
 
-Production breaks at 3 AM. Someone gets paged, reads a stack trace half-awake, finds
-the commit, reproduces the bug, writes the fix, writes the test, opens the PR, and
-writes the postmortem the next morning.
+## Sign up
 
-Pager Developer does all of that, and stops exactly where a human should take over.
+**[page-iota-six.vercel.app](https://page-iota-six.vercel.app)**: sign up with GitHub.
+Your first sign-in creates a workspace. From there:
+
+1. Install the GitHub App on the repositories you choose.
+2. Connect **Datadog** or **Sentry**, and **Slack**.
+3. Add a service: its repository, the health URL that reports its deployed commit,
+   the Slack channel, and how much it may do.
+
+Nothing to connect yet? **Send a test incident** from the setup page. It runs a demo
+incident against built-in stand-ins for GitHub, Datadog and Slack: investigate,
+reproduce, patch, validate, stop at the approval. It doesn't count against your plan.
+
+Self-hosting: `render.yaml` deploys the console, the API, the worker and Postgres.
+Every variable is documented in `.env.example`.
 
 <p align="center">
   <img src="docs/landing.png" alt="The Pager Developer landing page" width="100%"/>
 </p>
 
+## The benchmark
+
+`pnpm bench --repeat 3` covers 33 generated scenarios across three repositories:
+
+- **Repositories:** TypeScript with node:test, express with vitest from a lockfile,
+  and Python with pytest.
+- **Bugs (24):** null access, wrong default, off-by-one, missing await, unhandled
+  enum, wrong unit, missing fallback, division by zero and wrong operator.
+- **Negative controls (9):** situations where the right action is no pull request.
+  The error predates the deploy, the telemetry is hours stale, the cause is a
+  downstream 503, or the only "reproduction" is a flaky test.
+
+Each pull request is judged on a fresh clone of its head, against a hidden oracle test
+that no part of the run can see and the repository's whole suite.
+
+**These numbers are from scripted authorship: no model was called.** Every regression
+test and patch came from the recipe, as an eager author that always proposes a fix
+would write them. They measure detection and the deterministic gates: what gets
+through reproduction and validation, and which false pull requests the pipeline stops
+on its own. They say nothing about how well a model authors fixes. A live run
+(`pnpm bench --live --repeat 3`) measures that; none is published here.
+
+| metric (scripted, 99 trials) | value |
+| --- | --- |
+| fix rate (oracle passes and suite green) | 100% (72/72; 95% CI 95–100%) |
+| false pull requests (on a control, or failing the oracle) | 0% (0/72; 95% CI 0–5%) |
+| abstention precision | 100% (27/27; 95% CI 88–100%) |
+| abstention recall | 100% (27/27; 95% CI 88–100%) |
+| reproduction rate | 100% (72/72; 95% CI 95–100%) |
+| time to pull request, median / p90 | 2.9 s / 4.9 s |
+| model cost per incident, median | n/a (no model calls) |
+| tool calls per incident, median | 14 |
+| pass@3 | 100% (24/24; 95% CI 86–100%) |
+| scenarios with inconsistent outcomes across trials | 0 of 33 |
+
+**What it caught.** The benchmark's first run (kept as
+`evals/reports/benchmark-2026-09-30-before-fixes.json`) opened **5 false pull
+requests** and rejected one correct fix:
+
+- It "fixed" three errors that were already happening before the deploy.
+- It credited a flaky test as a reproduction, twice.
+- It ran stale Python bytecode after a same-length patch, which rejected a correct
+  fix.
+
+Each was a pipeline defect. Each was fixed with a test that failed first, and the
+table above is the run after those fixes.
+
+Full results, by kind and by scenario: [docs/benchmark.md](docs/benchmark.md).
+Raw trials: [`evals/reports/benchmark-2026-09-30.json`](evals/reports/benchmark-2026-09-30.json).
+
+## Architecture
+
 <p align="center">
   <img src="docs/architecture.svg" alt="Pager Developer architecture" width="100%"/>
 </p>
 
-## This is running right now
+- **apps/web** is the console: sign in with GitHub, set up integrations and
+  services, read incidents. It calls the API from its own server with one-minute
+  signed tokens, and never touches the database.
+- **apps/api** owns onboarding, integrations, the GitHub and Slack installs, the
+  webhooks, and the console's reads. Every request re-reads the membership, and every
+  query is scoped to the workspace.
+- **apps/worker** runs every workspace from a Postgres job queue. It polls each
+  service, opens an incident per distinct failure, and resumes a run a killed worker
+  left behind.
+- **packages/** hold the vendor adapters (GitHub, Datadog, Sentry, Slack, Jira,
+  Linear, Notion, Resend), the agents, the sandbox, the tracer, the domain and the
+  database.
 
-Not a simulation. A real service on Render, shipping real telemetry to a real Datadog
-account, watched by an agent with real GitHub credentials.
-
-| | |
-| --- | --- |
-| **Dashboard** | [pager-developer-worker.onrender.com](https://pager-developer-worker.onrender.com) — every stage, live |
-| **Watched service** | `checkout-api` on Render, reporting its own build revision |
-| **Pull requests opened autonomously** | [#5](https://github.com/he11world/test/pull/5), [#9](https://github.com/he11world/test/pull/9), [#12](https://github.com/he11world/test/pull/12) — merged by a human |
-| **Merge control** | a button in Slack; the approval is recorded against the person who clicked it |
-| **Postmortem** | [the write-up it filed](https://app.notion.com/p/INC-E505D848ED42-checkout-api-incident-write-up-3da562d1750581ed87bdd3c1d6203be0) for the incident in the demo — measured impact, measured recovery |
-
-**The test that matters.** A bug was planted in the checkout service and deployed
-without telling the agent what it was, where it was, or that anything had changed.
-It found the `TypeError` in Datadog, traced it to
-`src/checkout/service.ts`, read the deployed revision from the service's own health
-endpoint, reproduced the failure in a sandbox, wrote a regression test that failed
-before the patch and passed after it, and opened
-[#12](https://github.com/he11world/test/pull/12).
-
-The bug had two failure modes — a missing `destination`, and `rateFor()` returning
-`undefined` for an unsupported country. The patch guarded both. The second produced
-no logs of its own; it was found by reading the code at the deployed revision.
-
-Measured either side of the human merge, from Datadog:
-
-| Window | `/orders` requests | HTTP 500 | Error rate |
-| --- | --- | --- | --- |
-| Deploy → merge | 684 | 440 | **64.3%** |
-| After merge | 1,512 | 0 | **0%** |
-
-Traffic after the fix was more than double the incident window, so zero errors is not
-zero traffic. The [full write-up](https://app.notion.com/p/INC-E505D848ED42-checkout-api-incident-write-up-3da562d1750581ed87bdd3c1d6203be0)
-is the postmortem the agent files to Notion.
+Adapters are written against the vendors' real APIs. There is never an `if (twin)`
+branch in one. The local twins implement the vendors' protocols, git's included, so
+the same code runs against both. In detail:
+[docs/pager-developer-architecture.md](docs/pager-developer-architecture.md).
 
 ## The loop, end to end
 
 ```
-Datadog monitor alerts
+Datadog monitor alerts, or a Sentry issue is new or regressed
    │
    ├─ 1  Read what production is actually running   ← from the service, not assumed
    ├─ 2  Is this failure novel?                     ← runbooks say what's already known
-   ├─ 3  Investigate                                ← bounded read-tool loop, cited findings
-   ├─ 4  Reproduce it                               ← must FAIL, for the predicted reason
-   ├─ 5  Write the patch                            ← then the test must PASS
-   ├─ 6  Validate                                   ← real processes, real exit codes
-   ├─ 7  Open the pull request                      ← evidence attached, Slack merge button
+   ├─ 3  Investigate                                ← bounded read-only tools, cited findings
+   ├─ 4  Did this deploy cause it?                  ← the same error before it means no
+   ├─ 5  Reproduce it                               ← must FAIL twice, for the predicted reason
+   ├─ 6  Write the patch                            ← then the test must PASS twice
+   ├─ 7  Validate                                   ← real processes, real exit codes
+   ├─ 8  Open the pull request                      ← evidence attached, Slack merge button
    │
    ▼  a human decides
    │
-   ├─ 8  Verify recovery                            ← metrics either side of the merge
-   ├─ 9  File the postmortem to Notion
-   └─ 10 Mail the team
+   ├─ 9  Verify recovery                            ← metrics either side of the merge
+   ├─ 10 File the postmortem to Notion
+   └─ 11 Mail the team
 ```
 
-Steps 1–7 are autonomous. Step 8 onward happens only after a person merges.
-**The agent never merges and never deploys, at any autonomy level.**
+Steps 1–8 are autonomous. Step 9 onward happens only after a person merges.
+**The agent never merges and never deploys on its own.**
 
 ## What makes it trustworthy
 
 Anyone can wire an LLM to a stack trace. The hard part is building something an
-on-call engineer would believe at 3 AM. Three properties, each enforced in
-application code rather than requested of a model in a prompt:
+on-call engineer would believe at 3 AM. Each property below is enforced in
+application code rather than requested of a model in a prompt.
 
 ### Claims cannot outrun evidence
 
@@ -97,14 +147,16 @@ because it cannot fabricate an id the recorder never issued.
 ### Verification means a process ran
 
 A check has passed only when a command exited zero. A skipped check is not a passing
-check. Unparseable test output yields `null` counts, never `0` — *"0 failed"* and
-*"we could not tell"* must never look alike.
+check. Unparseable test output yields `null` counts, never `0`, because *"0 failed"*
+and *"we could not tell"* must never look alike.
 
-Reproduction requires **FAIL BEFORE** and **PASS AFTER**. A regression test that
-passes before the patch is rejected as not exercising the bug. A non-zero exit code
-is not a reproduction: the test must fail with a *failing assertion* matching text
-the author predicted in advance — a syntax error, a missing module or an
-already-red suite are each refused by name.
+Reproduction requires **FAIL BEFORE** and **PASS AFTER**, each twice. A regression
+test that passes before the patch is rejected as not exercising the bug. One that
+fails only sometimes is rejected as flaky. A non-zero exit code is not a
+reproduction: the test must fail with a failing assertion matching text the author
+predicted in advance. A syntax error, a missing module or a test runner that could
+not start is each refused by name. Tests that were already failing at the deployed
+revision are named and set aside, and the pull request says which.
 
 ### Correlation is not causation
 
@@ -117,176 +169,146 @@ everywhere it appears.
 
 The most valuable thing this system does is refuse.
 
-- **It abstains rather than guess.** Asked to blame a deployment, it has repeatedly
-  found the same errors in the baseline *before that deploy existed* and declined to
-  attribute — correctly.
+- **It will not blame a deploy for an older bug.** If the same failure was happening
+  in the hour before the deployment, it hands the incident over instead of "fixing" it
+  as that deploy's regression. With a model, the investigator can also reach this
+  conclusion; without one, the check in code does.
 - **It refuses to patch on stale telemetry.** If the evidence window doesn't reach
   the present, it says so instead of fixing yesterday's bug.
-- **It will not claim a recovery it did not measure.** Post-merge the verdict is
-  `RECOVERED`, `NOT_RECOVERED`, or `UNVERIFIABLE`. On `UNVERIFIABLE` the postmortem
-  is still filed — saying plainly that nothing could be measured — and the incident
-  **stays open** for a human to close. The email subject changes to match. False
-  comfort is the failure mode this system exists to prevent.
-- **It will not touch its own evidence.** A patch naming the regression test path is
-  rejected twice: once by the generator, again by the layer that writes to disk.
+- **It does not repair what is not in the code.** A downstream 503 inside a client
+  library cannot be reproduced by a test against the repository, so no patch is
+  offered.
+- **It will not claim a recovery it did not measure.** After the merge the verdict is
+  `RECOVERED`, `NOT_RECOVERED` or `UNVERIFIABLE`. On `UNVERIFIABLE` the postmortem is
+  still filed, saying plainly that nothing could be measured, and the incident **stays
+  open** for a human to close. The email subject changes to match. False comfort is
+  the failure mode this system exists to prevent.
+- **It will not touch its own evidence.** A patch that edits the regression test,
+  another test, CI, the lockfile or the test runner's configuration is refused.
 - **It refuses to substitute a branch head for the deployed revision.** A patch
   validated against a tree that is not the failing one proves nothing, so the
   workflow halts instead.
 
-## The website
+## A real incident
 
-`apps/web` is two surfaces in one Next.js app, set in the same visual language:
+Before Pager Developer was multi-tenant, its single-tenant version ran against a real
+service on Render: real telemetry in a real Datadog account, and real GitHub
+credentials.
 
-- **`/`** — the landing page: what the agent does, the guarantees it enforces, the
-  measured incident above, and how to run it.
-- **`/dashboard`** — the incident command centre: open incidents, deployments, agent
-  runs and policies, read from the API. It is read-only; nothing in it can act on
-  production.
+A bug was planted in the checkout service and deployed without telling the agent what
+it was, where it was, or that anything had changed. The agent:
 
-<p align="center">
-  <img src="docs/dashboard.png" alt="The incident command centre" width="100%"/>
-</p>
+- found the `TypeError` in Datadog and traced it to `src/checkout/service.ts`
+- read the deployed revision from the service's own health endpoint
+- reproduced the failure in a sandbox
+- wrote a regression test that failed before the patch and passed after it
+- opened [#12](https://github.com/he11world/test/pull/12)
 
-The halftone pager on the overview reflects real state: it rings, showing the top
-severity, only while an incident is open, and reads `CLEAR` otherwise.
+The bug had two failure modes: a missing `destination`, and `rateFor()` returning
+`undefined` for an unsupported country. The patch guarded both. The second produced
+no logs of its own; it was found by reading the code at the deployed revision. Pull
+requests [#5](https://github.com/he11world/test/pull/5),
+[#9](https://github.com/he11world/test/pull/9) and #12 were opened autonomously and
+merged by a human.
+
+Measured either side of the human merge, from Datadog:
+
+| Window | `/orders` requests | HTTP 500 | Error rate |
+| --- | --- | --- | --- |
+| Deploy → merge | 684 | 440 | **64.3%** |
+| After merge | 1,512 | 0 | **0%** |
+
+Traffic after the fix was more than double the incident window, so zero errors is not
+zero traffic. The [write-up](https://app.notion.com/p/INC-E505D848ED42-checkout-api-incident-write-up-3da562d1750581ed87bdd3c1d6203be0)
+is the postmortem the agent filed to Notion.
 
 ## Quick start
 
-Everything below runs with no credentials and no network, against local twins.
+Everything below runs without credentials, against local twins. Dependency installs
+for the demos fetch from npm and PyPI. The evaluation scripts read `.env`: if it holds
+a model key, `demo:workflow` and `bench --live` use it, and it is billed. `demo:e2e`
+and the scripted benchmark never call a model.
 
 ```bash
 pnpm install
+pnpm verify           # build, typecheck, lint, 664 tests in 57 files, build the apps
 
-pnpm preflight        # what is reachable: model, Arga twins, Lemma
-pnpm eval             # detection suite (deterministic)
-pnpm eval:agent       # investigation + repair suite; writes a JSON report
-pnpm demo:workflow    # the full incident workflow, alert to team email
-pnpm demo:repo        # the demo service's own test suite
+pnpm demo:e2e         # three demo services, Datadog- and Sentry-triggered, alert → PR
+pnpm bench --check    # prove every benchmark recipe is a real, shippable bug
+pnpm bench --repeat 3 # the benchmark (scripted); --live uses the model
+pnpm demo:workflow    # the full workflow on the checkout demo, alert → team email
 
-pnpm api:seed         # populate the database by running the real pipeline
-pnpm api              # API on http://127.0.0.1:4000
-pnpm --filter @pager/web dev   # landing page on http://127.0.0.1:4100, command centre at /dashboard
+pnpm api:seed && pnpm api        # the API on http://127.0.0.1:4000
+pnpm --filter @pager/web dev     # the console on http://127.0.0.1:4100
 ```
 
-`pnpm verify` — typecheck, lint, **510 tests** in 38 files, build — must pass before any commit.
+`pnpm test:contract` checks the adapters against the real GitHub, Slack, Datadog and
+Sentry APIs. It is opt-in, with sandbox credentials in the `CONTRACT_*` variables.
 
-A reasoning model is optional. Without one the system still detects, files, notifies,
-reproduces and hands off; it simply never claims to have diagnosed anything.
+A reasoning model is optional. Without one, the system still detects, files,
+notifies, reproduces and hands off; it simply never claims to have diagnosed
+anything.
 
 ### Run it as a service
 
-`apps/worker` is Pager Developer with nobody typing anything — for every workspace
-at once.
-
 ```bash
 pnpm db:migrate                          # the release step, against Postgres
-pnpm --filter @pager/worker start        # claim and run jobs continuously
-pnpm --filter @pager/worker once         # run everything due, then exit
+pnpm --filter @pager/api start
+pnpm --filter @pager/worker start
 ```
 
-Nothing about any service is configured in its environment. Each workspace sets up
-its services in the console — repository, health URL, Datadog, Slack channel,
-autonomy — and the worker reads them from the database. The environment holds only
-what the operator owns: `DATABASE_URL`, `PAGER_MASTER_KEY`, the GitHub App
-(`GITHUB_APP_*`), `SLACK_SIGNING_SECRET` for the merge button, and optionally an
-operator `ANTHROPIC_API_KEY` for workspaces that have not brought their own.
+Nothing about any service is configured in the environment. The environment holds
+only what the operator owns:
 
-The work is a Postgres queue (`FOR UPDATE SKIP LOCKED`): poll each enabled service on
-its interval, run an incident when one is new, wait on the human merge, verify
-recovery. At most one job per service runs at once, and a global cap bounds the
-rest. Everything is in the database, so a worker killed mid-incident loses nothing:
-its lease expires and another worker resumes the incident, reusing the ticket,
-thread, branch and pull request it had already made.
+- `DATABASE_URL`, `PAGER_MASTER_KEY` and `PAGER_SESSION_SECRET`
+- the GitHub App (`GITHUB_APP_*`)
+- the Slack app (`SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET`)
+- optionally, an operator `ANTHROPIC_API_KEY`
 
-**Where the repository's code runs.** Reproducing a failure means executing the
-watched repository's tests, and a patch, which is untrusted code.
-`PAGER_SANDBOX_RUNNER=docker` runs each command in a container with no network,
-a read-only root, a non-root uid, CPU/memory/pid limits and the repository mounted
-at `/work` (image: `PAGER_SANDBOX_IMAGE`, default `node:22-bookworm-slim`); it needs
-a Docker daemon that can bind-mount the sandbox directory. The default, `local`, is
-**for development only**: the code runs on the worker's host as its user, with only
-the environment (an allow-list), working directory and process group contained. The
-Docker runner is unit-tested against the command it builds, but has not yet been
-run against a real Docker daemon.
-
-The worker serves `/health` and `/status` (queue depth only, no tenant data). Incidents
-are read in the console, per workspace, behind sign-in.
-
-**It asks the service what revision it is running**, through its health URL, and
-skips the tick when the service cannot say. Every claim rests on having tested the
-tree that is actually failing, so this is never inferred.
-
-One incident per deployed revision. A monitor stays red for as long as the bug is
-live, and an agent that opened a pull request on every poll would be
-indistinguishable from a denial of service against its own reviewers — so each
-(service, deployed revision) is recorded once, durably, before anything is done about it.
-
-### Point it at real infrastructure
-
-Each adapter is chosen from configuration, one at a time. Every run prints which of
-its connections are real and which are twins, because that distinction is the whole
-claim.
-
-```bash
-pnpm probe:datadog <service>    # reports each signal as FOUND or ABSENT
-```
-
-Two Datadog credentials are needed and they are not interchangeable: an API key ships
-telemetry *in*, but every endpoint Pager reads also needs an **application key**.
-
-## Architecture
-
-```
-packages/
-  core/           domain types, incident state machine, evidence gate, tool policy
-  db/             Drizzle schema, repositories, Postgres-backed telemetry sink
-  providers/      GitHub · Datadog · Slack · Jira · Linear · Notion · Resend
-  observability/  instrumentation, agent-run and tool-call recording
-  agents/         watcher, investigator, patch generator, communication, recovery
-  sandbox/        isolated execution, repository profiling, deterministic validation
-  twin-local/     offline twin server with real diffs and deterministic reset
-apps/
-  api/            Fastify read API; owns the database connection
-  web/            Next.js landing page and incident command centre
-  worker/         the autonomous loop + live dashboard + Slack merge endpoint
-evals/            scenarios, evaluation harness, demos
-demo/checkout-api the service it watches — a real, deployable repository
-```
-
-**Adapters are written against real vendor APIs.** There is never an `if (twin)`
-branch inside one; backend selection happens once, in the registry. The same code
-that talks to the local twin talks to production Datadog.
-
-| App | What the adapter does |
-| --- | --- |
-| **GitHub** | branches, commits, trees, diffs, pull requests; authenticates as a GitHub App |
-| **Datadog** | monitors, logs, metrics — including the reserved-attribute and `monitor_tags` behaviour real accounts actually exhibit |
-| **Slack** | threads, replies, interactive blocks, signature-verified callbacks |
-| **Notion** | page trees, typed blocks, pagination |
-| **Jira** | REST v3, Atlassian Document Format, per-project transitions resolved at call time |
-| **Linear** | GraphQL, per-team workflow states |
-| **Resend** | team mail |
+**Where a repository's code runs.** `PAGER_SANDBOX_RUNNER=docker` runs each command
+in its own container: no network (except the dependency install), a read-only root, a
+non-root uid, all capabilities dropped, CPU, memory and pid limits. The default,
+`local`, is **for development only**.
 
 ## Security
 
-The Slack merge endpoint verifies every request: HMAC-SHA256 over the raw body,
-constant-time comparison, a five-minute replay window, and a repository allow-list.
-The pull request state is re-read from GitHub before any action, and the merge is
-pinned to the commit the message described: anything pushed afterwards makes GitHub
-refuse it, and Slack is told the pull request changed since review. Merging requires
-the configured autonomy level, and the approval is recorded against the person who
-clicked — not against the agent.
+Repository content, logs and runbooks are **data, never instructions**. The GitHub App
+can merge, so "never merges on its own" is enforced in code: a merge needs autonomy L4
+and a signed Slack click by a linked owner or admin, pinned to the reviewed commit.
+The full threat model is in [SECURITY.md](SECURITY.md).
 
-Repository content, logs and runbooks are treated as **data, never as instructions**.
+## Limitations
 
-**What the GitHub token could do, and what stops it.** The GitHub App asks for
-`contents: write` and `pull_requests: write`, which is enough to merge a pull request.
-"Never merges on its own" is therefore enforced in code — merging needs autonomy L4
-and a recorded click by a workspace owner or admin — not by the token's scope. Each
-job's installation token is narrowed to the one repository it is working on.
+- **No live-model benchmark is published.** The numbers above are scripted; they
+  measure the pipeline, not a model's fixes. Nothing here claims a model fix rate.
+- **The Render blueprint's sandbox is a local process.** Render runs no Docker
+  daemon, so repository code runs on the worker host with only its environment and
+  lifetime contained. That is fine for repositories you own; it is not isolation
+  between tenants.
+- **Not run against a Docker daemon.** `DockerRunner` builds exactly the command it
+  should (unit-tested), but has not been run against a daemon here. Installs inside
+  Docker need an image with the package manager (corepack for pnpm and yarn).
+- **Not run against live accounts.** The contract suite exists and has not been run
+  against live GitHub, Slack, Datadog or Sentry accounts. Everything else is verified
+  against the local twins.
+- **Hosted sign-up not exercised end to end.** The public console serves the landing
+  and sign-in pages; the flow behind sign-in was verified locally against twins, not
+  on the hosted deployment.
+- **Languages:** TypeScript and JavaScript (node:test, vitest, jest; npm, pnpm, yarn,
+  bun) and Python (pytest; uv, or a requirements file pinned with `==`). Nothing else
+  yet. Private package registries are not supported. A manifest without a lockfile is
+  not installed.
+- **Alert sources:** Datadog monitors and Sentry issues. Sentry's "alerting" is a
+  heuristic: new, regressed or escalating, or first seen in the last day. A
+  self-hosted Sentry needs the operator to allow its URL.
+- **Arga's hosted GitHub twin** does not compute diffs and almost certainly cannot
+  serve `git clone`, which the sandbox now needs (untested).
+- **Plans and billing:** plan limits are placeholders, and Stripe is not wired.
+- **The master key** is an environment variable; there is no KMS integration yet.
+- **No per-client rate limiting** on the API's routes.
 
 ---
 
 <p align="center">
-  <sub>7 packages · 3 apps · 168 TypeScript files · 38 test files · 510 tests</sub>
+  <sub>7 packages · 3 apps · 57 test files · 664 tests (pnpm verify) · MIT</sub>
 </p>
