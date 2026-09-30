@@ -18,10 +18,13 @@ import {
   Sandbox,
   ValidationEngine,
   describeAssertionEvidence,
+  installDependencies,
   describeReproduction,
   profileRepository,
   singleTestCommand,
   testCountRegression,
+  type DependencyCache,
+  type InstallResult,
   type ReproductionAttempt,
   type SandboxRunner,
   type ValidationRun,
@@ -140,6 +143,8 @@ export interface WorkflowDeps {
    * `LocalProcessRunner`, which is for development only.
    */
   sandboxRunner?: SandboxRunner;
+  /** Installed dependency trees, kept between sandboxes by lockfile hash. */
+  dependencyCache?: DependencyCache | null;
   /**
    * The clock.
    *
@@ -323,6 +328,8 @@ export interface WorkflowResult {
   regressionTest: RegressionTestProposal | null;
   /** Checks run before the regression test existed, to rule out a broken suite. */
   preexistingChecks: ValidationRun | null;
+  /** How the repository's dependencies were installed, or why they were not. */
+  dependencies: InstallResult | null;
   /** True when a bounded repair retry was used. */
   repairAttempted: boolean;
   /** What the post-merge evidence supported. Null before recovery is checked. */
@@ -365,6 +372,7 @@ export class IncidentWorkflow {
       deployedRevision: null,
       regressionTest: null,
       preexistingChecks: null,
+      dependencies: null,
       repairAttempted: false,
       recoveryVerdict: null,
       slackThreadTs: null,
@@ -760,6 +768,19 @@ export class IncidentWorkflow {
 
     try {
       const profile = await profileRepository(sandbox);
+
+      // Dependencies, from the lockfile only, before any check runs: a suite run
+      // without them fails on imports, which says nothing about the incident.
+      const installed = await installDependencies(sandbox, profile, { cache: this.deps.dependencyCache ?? null });
+      result.dependencies = installed;
+      step('reproducing', `Dependencies: ${installed.status} — ${installed.detail}`);
+      if (installed.status === 'failed' || installed.status === 'unpinned') {
+        return await halt(
+          `The repository's dependencies could not be installed (${installed.status}): ${installed.detail} ` +
+            `Its tests cannot be run meaningfully without them, so nothing was reproduced.`,
+        );
+      }
+
       const validation = new ValidationEngine(sandbox);
       const reproduction = new ReproductionAgent(sandbox, validation);
 
@@ -1073,6 +1094,7 @@ export class IncidentWorkflow {
       deployedRevision: null,
       regressionTest: null,
       preexistingChecks: null,
+      dependencies: null,
       repairAttempted: false,
       recoveryVerdict: null,
       slackThreadTs: null,

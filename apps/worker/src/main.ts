@@ -19,7 +19,7 @@ import { CredentialVault, JobQueue, PlanRepository, UsageRepository, createDatab
 import { githubAppFromEnv } from '@pager/providers';
 import { AnthropicModel, IncidentInvestigator, MeteredModel, ModelPatchGenerator } from '@pager/agents';
 import { usageMeter } from './meter.ts';
-import { DockerRunner, LocalProcessRunner } from '@pager/sandbox';
+import { DirectoryDependencyCache, DockerRunner, LocalProcessRunner } from '@pager/sandbox';
 import { describeConfig, loadConfig } from './config.ts';
 import type { JobContext } from './jobs.ts';
 import { handleSlackInteraction } from './merge-endpoint.ts';
@@ -66,6 +66,7 @@ async function main(): Promise<void> {
     },
     queue,
     sandboxRunner: config.sandbox.runner === 'docker' ? new DockerRunner({ image: config.sandbox.image }) : new LocalProcessRunner(),
+    dependencyCache: new DirectoryDependencyCache(config.dependencyCacheDir),
     // A workspace's own key when it brought one; otherwise the operator's, if any.
     // With neither, the workflow still detects, files and reports, and stops short of
     // a patch, saying why.

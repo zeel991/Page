@@ -8,7 +8,8 @@
  * Validated up front: a worker that starts half-configured fails at the first
  * incident instead of at boot.
  */
-import { hostname } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export interface OperatorConfig {
   databaseUrl: string;
@@ -20,6 +21,8 @@ export interface OperatorConfig {
   operatorAnthropicKey: string | null;
   model: string;
   sandbox: { runner: 'local' } | { runner: 'docker'; image: string };
+  /** Where installed dependency trees are cached between incidents, by lockfile hash. */
+  dependencyCacheDir: string;
   /** Jobs this process runs at once, and jobs all processes together may run. */
   concurrency: number;
   maxRunningJobs: number;
@@ -63,6 +66,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OperatorConfig
     operatorAnthropicKey: env.ANTHROPIC_API_KEY?.trim() || null,
     model: env.PAGER_MODEL?.trim() || 'claude-opus-5',
     sandbox: runner === 'docker' ? { runner: 'docker', image: env.PAGER_SANDBOX_IMAGE?.trim() || 'node:22-bookworm-slim' } : { runner: 'local' },
+    dependencyCacheDir: env.PAGER_DEPENDENCY_CACHE?.trim() || join(tmpdir(), 'pager-dependency-cache'),
     concurrency: int(env, 'PAGER_WORKER_CONCURRENCY', 2, 1, 64, problems),
     maxRunningJobs: int(env, 'PAGER_MAX_RUNNING_JOBS', 4, 1, 1024, problems),
     workerId: env.PAGER_WORKER_ID?.trim() || `${hostname()}:${process.pid}`,

@@ -11,7 +11,7 @@ import {
   type WorkflowCheckpoint,
 } from '@pager/agents';
 import { deploymentFromRevision, probeDeployedRevision, type TimeRange } from '@pager/providers';
-import type { SandboxRunner } from '@pager/sandbox';
+import type { DependencyCache, SandboxRunner } from '@pager/sandbox';
 import { decideRecoveryWindow } from './recovery-window.ts';
 import { runSampleIncident } from './sample-incident.ts';
 import { PlanRepository } from '@pager/db';
@@ -34,6 +34,8 @@ export interface JobContext {
   op: OperatorServices;
   queue: JobQueue;
   sandboxRunner: SandboxRunner;
+  /** Installed dependency trees shared between incidents, by lockfile hash. */
+  dependencyCache?: DependencyCache | null;
   /**
    * The reasoning steps for a tenant: model-backed in production, scripted in tests.
    * `incidentId` reads the incident the run is on, for usage records.
@@ -73,6 +75,7 @@ function workflowFor(c: JobContext, tenant: Tenant, incidentId: () => string | n
     persistence: tenant.persistence,
     autonomy: tenant.autonomy,
     sandboxRunner: c.sandboxRunner,
+    ...(c.dependencyCache ? { dependencyCache: c.dependencyCache } : {}),
     ...(agents.patchGenerator ? { patchGenerator: agents.patchGenerator } : {}),
     ...(agents.investigator ? { investigator: agents.investigator } : {}),
     ...(c.op.now ? { now: c.op.now } : {}),
