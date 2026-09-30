@@ -14,7 +14,8 @@ RUN apt-get update \
 
 # Package managers installed globally rather than through corepack: corepack fetches
 # a repository's declared version on first use, and a test step has no network.
-RUN npm install -g pnpm@12.8.2 yarn@1.22.22 && npm cache clean --force
+# (The node image already ships yarn 1.)
+RUN npm install -g pnpm@12.8.2 && npm cache clean --force && yarn --version
 
 COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
 
