@@ -30,7 +30,8 @@
     "probe:datadog": "pnpm --filter @pager/evals probe:datadog",
     "db:migrate": "pnpm --filter @pager/db migrate",
     "demo:e2e": "pnpm --filter @pager/evals e2e",
-    "bench": "pnpm --filter @pager/evals bench"
+    "bench": "pnpm --filter @pager/evals bench",
+    "test:contract": "vitest run --config vitest.contract.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
