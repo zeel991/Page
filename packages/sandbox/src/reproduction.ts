@@ -259,6 +259,17 @@ export class ReproductionAgent {
       }
     }
 
+    // Once is not a reproduction: a test that fails only sometimes against the same
+    // code proves nothing about the code. It must fail again, unchanged.
+    if (evidence.problems.length === 0) {
+      const again = await this.validation.runCheck('reproduction', input.command, input.timeoutMs);
+      if (again.passed) {
+        evidence.problems.push(
+          'the test failed once and then passed against the same unpatched code, so it is flaky and demonstrates nothing',
+        );
+      }
+    }
+
     if (evidence.problems.length > 0) {
       attempt.failureReason =
         `\`${input.command}\` exited ${beforeFix.exitCode}, but that is not a demonstrated ` +
@@ -286,10 +297,16 @@ export class ReproductionAgent {
       );
     }
 
-    const afterFix = await this.validation.runCheck('reproduction', attempt.command, timeoutMs);
+    // Twice, as the failure was: a fix that passes only sometimes is not a fix.
+    const accepts = (run: ValidationRun) => run.passed || onlyExcludedFailures(run, excluded.length ? excluded : null);
+    let afterFix = await this.validation.runCheck('reproduction', attempt.command, timeoutMs);
+    if (accepts(afterFix)) {
+      const again = await this.validation.runCheck('reproduction', attempt.command, timeoutMs);
+      if (!accepts(again)) afterFix = again;
+    }
     // Passing, or failing only in tests that were already failing before anything
     // was changed — which the patch neither caused nor was asked to fix.
-    const proven = afterFix.passed || onlyExcludedFailures(afterFix, excluded.length ? excluded : null);
+    const proven = accepts(afterFix);
 
     return {
       ...attempt,

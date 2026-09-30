@@ -74,3 +74,27 @@ describe('the suite baseline', () => {
     expect(onlyExcludedFailures(after, ['eventually consistent'])).toBe(false);
   });
 });
+
+describe('reproduction against a flaky test', () => {
+  let sandbox: Sandbox | null = null;
+  afterEach(async () => {
+    await sandbox?.dispose();
+    sandbox = null;
+  });
+
+  it('refuses a test that fails once and then passes against the same code', async () => {
+    // Found by the benchmark: a timing-dependent test failed before the patch, passed
+    // after it, and was credited as fail-before/pass-after.
+    sandbox = await Sandbox.fromFiles({ 'package.json': JSON.stringify({ name: 'x', type: 'module', scripts: { test: 'node --test' } }) }, 'rev');
+    const validation = new ValidationEngine(sandbox);
+    const attempt = await new ReproductionAgent(sandbox, validation).demonstrateFailure({
+      testPath: 'test/flaky.test.js',
+      testSource:
+        "import { it } from 'node:test';\nimport { existsSync, writeFileSync } from 'node:fs';\n" +
+        "it('times out', () => { const warm = existsSync('.warm'); writeFileSync('.warm', ''); if (!warm) throw new Error('TimeoutError: slow'); });\n",
+      command: 'node --test test/flaky.test.js',
+      expectedFailureMarkers: ['TimeoutError'],
+    });
+    expect(attempt.failureReason).toMatch(/flaky/);
+  });
+});

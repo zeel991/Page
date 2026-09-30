@@ -49,7 +49,7 @@ describe('dockerRunArgs', () => {
 
   it('passes the allow-listed environment and nothing of the host', () => {
     const env = args.flatMap((a, i) => (args[i - 1] === '--env' ? [a] : []));
-    expect(env.map((e) => e.split('=')[0]).sort()).toEqual(['CI', 'FORCE_COLOR', 'HOME', 'NODE_ENV', 'NO_COLOR', 'PATH', 'TMPDIR']);
+    expect(env.map((e) => e.split('=')[0]).sort()).toEqual(['CI', 'FORCE_COLOR', 'HOME', 'NODE_ENV', 'NO_COLOR', 'PATH', 'PYTHONDONTWRITEBYTECODE', 'TMPDIR']);
     expect(env).toContain('HOME=/home/sandbox');
   });
 

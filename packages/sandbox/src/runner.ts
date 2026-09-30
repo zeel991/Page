@@ -76,6 +76,10 @@ export function sandboxEnvironment(opts: {
     // the output would defeat every pattern that reads it.
     NO_COLOR: '1',
     FORCE_COLOR: '0',
+    // Python validates cached bytecode by source size and mtime (whole seconds), so a
+    // patch the same length as the line it replaces, written within the second, ran
+    // the old code. No cache is written, so the code that runs is the code on disk.
+    PYTHONDONTWRITEBYTECODE: '1',
     NODE_ENV: 'test',
     ...(opts.extra ?? {}),
   };

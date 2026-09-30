@@ -35,7 +35,7 @@ import {
   type ValidationRun,
 } from '@pager/sandbox';
 import { ProductionWatcher, describeAlert, type ProductionAlert } from './production-watcher.js';
-import { firstSentences, locateInRepository, toRepositoryPath } from './log-analysis.js';
+import { clusterErrors, clustersFromGroups, failureKey, firstSentences, locateInRepository, toRepositoryPath } from './log-analysis.js';
 import {
   NoPatchGenerator,
   type PatchContext,
@@ -798,6 +798,18 @@ export class IncidentWorkflow {
         result.issue,
       );
       return await halt(`No diagnosis was reached: ${why} No pull request was opened.`);
+    }
+
+    // ── 4c. Did this deployment cause it at all? ─────────────────────────────
+    //
+    // A failure already happening before the deployment was not introduced by it.
+    // Repairing it as this deployment's regression would blame a deploy for a bug it
+    // did not ship. Checked from the errors themselves, in application code, whether
+    // or not a model is investigating.
+    const predates = await this.failurePredatesDeployment(trace, alert, input, revision.sha);
+    if (predates) {
+      await this.reportHandoff(comms, thread, predates, result.issue);
+      return await halt(predates);
     }
 
     // ── 4c. Is production even running what the branch says? ─────────────────
@@ -1613,6 +1625,43 @@ export class IncidentWorkflow {
    * autonomy its actions require is a misconfiguration, and quietly skipping the
    * pull request would leave an incident that looks handled and is not.
    */
+  /**
+   * The same failure — same root frame, or same signature — in the hour before the
+   * deployment went out: the reason, or null when there was none (or the read could
+   * not be made, which is recorded and does not block).
+   */
+  private async failurePredatesDeployment(
+    trace: <T>(name: string, fn: (ctx: AgentRunContext) => Promise<T>) => Promise<T>,
+    alert: ProductionAlert,
+    input: WorkflowInput,
+    sha: string,
+  ): Promise<string | null> {
+    const deployedAt = input.deployment?.deployedAt;
+    const primary = alert.primary;
+    if (!deployedAt || !primary) return null;
+    const key = alert.failures.find((f) => f.cluster.signature === primary.signature)?.key ?? failureKey(primary);
+    const window = { from: new Date(deployedAt.getTime() - 60 * 60_000), to: new Date(deployedAt.getTime() - 2 * 60_000) };
+    const source = this.alertSource();
+    try {
+      const read = await trace('DeploymentObserver', async (ctx) =>
+        (await ctx.tool('observability.readErrors', { backend: source.backend, service: input.service, from: window.from, to: window.to, purpose: 'before the deployment' }, () =>
+          source.readErrors(input.service, window, { limit: 200 }),
+        )).value,
+      );
+      const before = read.kind === 'logs' ? clusterErrors(read.logs) : clustersFromGroups(read.groups);
+      const same = before.find((c) => failureKey(c) === key || c.signature === primary.signature);
+      if (!same) return null;
+      return (
+        `The failure predates the deployment: ${same.count} occurrence(s) of the same ${same.errorType ?? 'error'} ` +
+        `(${key}) between ${window.from.toISOString()} and ${window.to.toISOString()}, before ${sha.slice(0, 12)} ` +
+        `was deployed at ${deployedAt.toISOString()}. It was not introduced by this deployment, so it is not repaired ` +
+        `as a regression of it. No pull request was opened; it is handed over for a person to look at.`
+      );
+    } catch {
+      return null;
+    }
+  }
+
   /** The configured alert source, or the metrics backend when it is one. */
   private alertSource(): AlertSource {
     if (this.deps.alerts) return this.deps.alerts;

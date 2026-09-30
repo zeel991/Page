@@ -156,6 +156,24 @@ describe('Sentry as the alert source', () => {
   });
 });
 
+describe('failures the deployment did not cause', () => {
+  it('hands over, without a pull request, a failure that was already happening before the deployment', async () => {
+    // Found by the benchmark: with no model investigating, nothing noticed the same
+    // error an hour before the deploy, and a "fix" for this deploy was opened.
+    const logs = INC_001.logs!.map((l) => (l.level === 'error' ? { ...l, from: '2026-09-13T13:50:00Z', count: 40, intervalSeconds: 90 } : l));
+    const { workflow, deployment } = await build({ ...INC_001, logs }, 'scripted');
+    const result = await workflow.run({ ...input, deployment });
+    expect(result.pullRequest).toBeNull();
+    expect(result.haltReason).toMatch(/predates the deployment/);
+    expect(server.current.repositories.get('acme/checkout-api')!.pullRequests.filter((p) => p.number > 377)).toEqual([]);
+  });
+
+  it('still repairs a failure that began after it', async () => {
+    const { workflow, deployment } = await build(INC_001, 'scripted');
+    expect((await workflow.run({ ...input, deployment })).pullRequest).not.toBeNull();
+  });
+});
+
 describe('repositories that are not the demo', () => {
   it('does not let a test that was already failing block the incident, and says which it set aside', async () => {
     // The deployed revision ships a broken, unrelated test alongside the bug.

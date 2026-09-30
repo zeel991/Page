@@ -70,8 +70,24 @@ describe('Sandbox containment', () => {
       CI: '1',
       NO_COLOR: '1',
       FORCE_COLOR: '0',
+      PYTHONDONTWRITEBYTECODE: '1',
       NODE_ENV: 'test',
     });
+  });
+
+  it('runs the Python on disk after a same-length edit, not stale bytecode', async () => {
+    // Found by the benchmark: "+ credit" patched to "- credit" within the same second
+    // left the fix unrun, and a correct patch was rejected.
+    const s = await makeSandbox();
+    const { utimes, stat } = await import('node:fs/promises');
+    await s.writeFile('calc.py', 'def f(a, b):\n    return a + b\n');
+    const pinned = (await stat(join(s.dir, 'calc.py'))).mtime;
+    const first = await s.run('python3', ['-c', 'import calc; print(calc.f(5, 1))']);
+    expect(first.stdout.trim()).toBe('6');
+    await s.writeFile('calc.py', 'def f(a, b):\n    return a - b\n');
+    await utimes(join(s.dir, 'calc.py'), pinned, pinned);
+    const second = await s.run('python3', ['-c', 'import calc; print(calc.f(5, 1))']);
+    expect(second.stdout.trim()).toBe('4');
   });
 
   it('reads a runner that colours its output anyway', async () => {
@@ -94,7 +110,7 @@ describe('Sandbox containment', () => {
       const result = await s.run('node', ['-e', 'console.log(JSON.stringify(process.env))']);
       const env = JSON.parse(result.stdout) as Record<string, string>;
       // macOS adds __CF_USER_TEXT_ENCODING to every process; it is not inherited from us.
-      expect(Object.keys(env).filter((k) => !k.startsWith('__CF_')).sort()).toEqual(['CI', 'FORCE_COLOR', 'HOME', 'NODE_ENV', 'NO_COLOR', 'PATH', 'TMPDIR']);
+      expect(Object.keys(env).filter((k) => !k.startsWith('__CF_')).sort()).toEqual(['CI', 'FORCE_COLOR', 'HOME', 'NODE_ENV', 'NO_COLOR', 'PATH', 'PYTHONDONTWRITEBYTECODE', 'TMPDIR']);
       expect(env.HOME).not.toBe(homedir());
       expect(env.HOME!.startsWith(s.root)).toBe(true);
       // Outside the working copy, so a test runner never discovers it.
