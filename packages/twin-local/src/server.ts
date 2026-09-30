@@ -1,6 +1,10 @@
+import { mkdtempSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { datadogRoutes } from './datadog-routes.js';
-import { githubRoutes } from './github-routes.js';
+import { findRepo, githubRoutes } from './github-routes.js';
+import { GIT_PATH, TwinGitServer } from './git-http.js';
 import { matchRoute, type Route } from './router.js';
 import { slackRoutes } from './slack-routes.js';
 import { jiraRoutes, linearRoutes, notionRoutes } from './tracker-routes.js';
@@ -43,6 +47,7 @@ export class LocalTwinServer {
   private readonly routes: { prefix: string; routes: Route[] }[];
   private readonly now: () => number;
   private boundPort = 0;
+  private git: TwinGitServer | null = null;
 
   constructor(private readonly opts: TwinServerOptions = {}) {
     this.now = opts.now ?? (() => Date.now());
@@ -106,10 +111,18 @@ export class LocalTwinServer {
       this.server!.close((err) => (err ? reject(err) : resolve())),
     );
     this.server = null;
+    await this.git?.dispose();
+    this.git = null;
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${this.boundPort}`);
+    if (GIT_PATH.test(url.pathname)) {
+      this.git ??= new TwinGitServer(mkdtempSync(join(tmpdir(), 'pager-twin-git-')));
+      return this.git.handle(req, res, url, this.state, (owner, repo, token) =>
+        findRepo(this.state, owner, repo, { authorization: `Bearer ${token}` }),
+      );
+    }
     const group = this.routes.find((g) => url.pathname.startsWith(`${g.prefix}/`));
 
     if (!group) {

@@ -6,7 +6,10 @@ import {
   registerViaManifest,
 } from '@pager/providers';
 import { INC_001, LocalTwinServer, seedFromFixture } from '@pager/twin-local';
-import { homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Sandbox, SandboxPathError } from '../src/sandbox.js';
 import { sandboxEnvironment } from '../src/runner.js';
 import { profileRepository } from '../src/repository-profile.js';
@@ -141,15 +144,39 @@ describe('Sandbox containment', () => {
     expect(result.stdout).toContain('; rm -rf /');
   });
 
-  it('refuses to build a sandbox from a truncated tree listing', async () => {
-    // A working copy missing files is not the tree that is failing.
-    const partial = { listFiles: async () => ({ paths: ['src/a.ts'], truncated: true }), getFile: async () => 'x' };
-    await expect(Sandbox.create(partial as never, 'acme/checkout-api', 'abc')).rejects.toThrow(/only part of/);
+  it('checks out the pinned revision byte for byte, binary files included', async () => {
+    // A real repository holding bytes that are not valid UTF-8. Reading every file
+    // through the API and decoding it as text replaced these with U+FFFD.
+    const origin = await mkdtemp(join(tmpdir(), 'pager-origin-'));
+    try {
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x80]);
+      await writeFile(join(origin, 'logo.png'), bytes);
+      await writeFile(join(origin, 'README.md'), 'hello\n');
+      const git = (args: string[]) => execFileSync('git', args, { cwd: origin, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+      git(['init', '-q']);
+      git(['config', 'uploadpack.allowFilter', 'true']);
+      git(['config', 'uploadpack.allowAnySHA1InWant', 'true']);
+      git(['add', '.']);
+      git(['commit', '-q', '-m', 'binary']);
+      const sha = git(['rev-parse', 'HEAD']).trim();
+      const local = { cloneUrl: () => `file://${origin}`, gitAuthEnvironment: async () => ({}) };
+
+      sandbox = await Sandbox.create(local, 'local/origin', sha);
+      expect((await readFile(join(sandbox.dir, 'logo.png'))).equals(bytes)).toBe(true);
+      expect((await sandbox.run('git', ['rev-parse', 'HEAD'])).stdout.trim()).toBe(sha);
+    } finally {
+      await rm(origin, { recursive: true, force: true });
+    }
   });
 
-  it('refuses to build a sandbox from an empty revision', async () => {
-    const empty = { ...github, listFiles: async () => ({ paths: [], truncated: false }) } as unknown as GitHubProvider;
-    await expect(Sandbox.create(empty, 'acme/checkout-api', 'abc')).rejects.toThrow(/no files/);
+  it('refuses to build a sandbox from a revision the repository does not have', async () => {
+    await expect(Sandbox.create(github, 'acme/checkout-api', 'f'.repeat(40))).rejects.toThrow(/git fetch.*failed/);
+  });
+
+  it('keeps the credential out of the working copy', async () => {
+    const s = await makeSandbox();
+    const config = await readFile(join(s.dir, '.git', 'config'), 'utf8');
+    expect(config).not.toMatch(/ghs_|x-access-token|Authorization/i);
   });
 });
 

@@ -1,7 +1,7 @@
+import { commitId, treeObjects } from './git-objects.js';
 import { generateKeyPairSync, createPublicKey, createVerify, randomBytes } from 'node:crypto';
 import {
   blobSha,
-  commitSha,
   diffCommits,
   type StoredCommit,
   type StoredInstallation,
@@ -34,7 +34,7 @@ const UNAUTHENTICATED = {
  * GitHub, which does not confirm that a private repository exists. A request with
  * no token (the contents route serves public reads) is not narrowed.
  */
-function findRepo(state: TwinState, owner: string, repo: string, headers?: Record<string, string>): StoredRepository | undefined {
+export function findRepo(state: TwinState, owner: string, repo: string, headers?: Record<string, string>): StoredRepository | undefined {
   const found = state.repositories.get(`${owner}/${repo}`);
   if (!found || !headers) return found;
   const token = bearerOf(headers);
@@ -795,7 +795,7 @@ export function githubRoutes(): Route[] {
           files.set(entry.path, content);
         }
 
-        const sha = commitSha('tree', [body.base_tree ?? ''], files);
+        const sha = treeObjects(files).sha;
         ctx.state.trees.set(sha, files);
         return { status: 201, body: { sha } };
       },
@@ -819,13 +819,16 @@ export function githubRoutes(): Route[] {
 
         const message = body.message ?? 'Update';
         const parents = body.parents ?? [];
-        const sha = commitSha(message, parents, files);
+        const authorName = body.author?.name ?? 'pager-developer';
+        const authorEmail = body.author?.email ?? 'pager@example.com';
+        const committedAt = new Date(ctx.now()).toISOString();
+        const sha = commitId({ message, parents, authorName, authorEmail, committedAt, files });
         const commit: StoredCommit = {
           sha,
           message,
-          authorName: body.author?.name ?? 'pager-developer',
-          authorEmail: body.author?.email ?? 'pager@example.com',
-          committedAt: new Date(ctx.now()).toISOString(),
+          authorName,
+          authorEmail,
+          committedAt,
           parents,
           files: new Map(files),
         };

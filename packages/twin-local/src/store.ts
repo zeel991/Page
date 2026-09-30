@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { blobObject } from './git-objects.js';
 
 /**
  * In-memory state for the local twins.
@@ -206,23 +206,9 @@ export interface TwinState {
 }
 
 /** Content-addressed sha, so the same seed always produces the same history. */
-export function commitSha(
-  message: string,
-  parents: string[],
-  files: Map<string, string>,
-): string {
-  const hash = createHash('sha1');
-  hash.update(message);
-  hash.update(parents.join(','));
-  for (const path of [...files.keys()].sort()) {
-    hash.update(path);
-    hash.update(files.get(path) ?? '');
-  }
-  return hash.digest('hex');
-}
-
+/** Git's blob id for a file's content. */
 export function blobSha(content: string): string {
-  return createHash('sha1').update(`blob ${content.length}\0${content}`).digest('hex');
+  return blobObject(content).sha;
 }
 
 export interface ChangedFileRecord {

@@ -161,6 +161,15 @@ describe('GitHubProvider', () => {
     expect(real.cloneUrl('acme/checkout-api')).toBe('https://github.com/acme/checkout-api.git');
   });
 
+  it('keeps the base path of a server that does not live at the root', async () => {
+    const { fetchImpl } = stubFetch([]);
+    const token = 'ghs_tokentokentokentoken1234';
+    const ghes = new GitHubProvider({ baseUrl: 'https://ghe.example.com/api/v3', token, fetchImpl });
+    expect(ghes.cloneUrl('acme/checkout-api')).toBe('https://ghe.example.com/acme/checkout-api.git');
+    const prefixed = new GitHubProvider({ baseUrl: 'http://127.0.0.1:4600/github/', token, fetchImpl });
+    expect(prefixed.cloneUrl('acme/checkout-api')).toBe('http://127.0.0.1:4600/github/acme/checkout-api.git');
+  });
+
   it('authenticates git through an extra header in the environment, not argv or the URL', async () => {
     const { fetchImpl } = stubFetch([]);
     const gh = new GitHubProvider({ baseUrl: 'https://api.github.com', token: 'ghs_tokentokentokentoken1234', fetchImpl });

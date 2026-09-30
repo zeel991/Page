@@ -1,5 +1,5 @@
+import { commitId } from './git-objects.js';
 import {
-  commitSha,
   emptyState,
   type StoredCommit,
   type StoredLog,
@@ -163,12 +163,13 @@ export function seedFromFixture(fixture: ScenarioFixture): TwinState {
       }
     }
 
-    const sha = commitSha(c.message, parents, files);
+    const authorEmail = `${c.author.toLowerCase().replace(/\s+/g, '.')}@example.com`;
+    const sha = commitId({ message: c.message, parents, authorName: c.author, authorEmail, committedAt: c.at, files });
     const commit: StoredCommit = {
       sha,
       message: c.message,
       authorName: c.author,
-      authorEmail: `${c.author.toLowerCase().replace(/\s+/g, '.')}@example.com`,
+      authorEmail,
       committedAt: c.at,
       parents,
       files,
