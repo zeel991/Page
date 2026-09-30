@@ -29,7 +29,7 @@ service to watch.
                │  console routes, integrations,        │  polls every enabled service,
                │  GitHub/Slack installs, webhooks      │  runs incidents from a job queue
                ▼                                       ▼
-        GitHub App · Slack app · Datadog · Sentry · Notion · Resend · Anthropic
+        GitHub App · Slack app · Datadog · Sentry · Notion · Resend · Anthropic · Dodo Payments
 ```
 
 - **apps/web** is the console. Sign-in is GitHub OAuth through the operator's GitHub
@@ -74,7 +74,7 @@ service to watch.
 | Tenant secrets | Envelope encryption: AES-256-GCM with a data key per row, wrapped by `PAGER_MASTER_KEY`. The workspace and kind of secret are the AAD. `KeyWrapper` is the seam for a KMS. |
 | GitHub | One operator App. Every job mints an installation token narrowed to the one repository it works on. |
 | Slack | One operator app; each workspace installs it and its bot token goes straight into the vault. Members are linked by email so a merge click is attributable to a person. |
-| Plans | `plans` rows (placeholder limits: services per workspace, incidents per month, included model spend). Stripe is not wired. |
+| Plans | `plans` rows (limits: services per workspace, incidents per month, included model spend). Paid plans are Dodo Payments subscriptions: `billing_subscriptions` holds Dodo's last reading, and `organizations.plan_id` follows it (§11). |
 
 ## 4. Package layout
 
@@ -84,7 +84,7 @@ packages/
                  signed tokens, envelope encryption, redaction, service config rules
   db/            Drizzle schema and migrations, repositories, the job queue, the vault
   providers/     vendor adapters against the real APIs: GitHub (REST + git over HTTPS),
-                 Datadog, Sentry, Slack, Jira, Linear, Notion, Resend; the GitHub App
+                 Datadog, Sentry, Slack, Jira, Linear, Notion, Resend, Dodo Payments; the GitHub App
                  client; connection tests; safe fetch; the registry for development
   observability/ the tracer: every agent run and tool call recorded, locally and to Lemma
   agents/        the workflow, production watcher, investigator, patch generators,
@@ -211,10 +211,19 @@ stable part of the prompt is cached.
 
 ## 11. Deployment
 
-`render.yaml` declares the console, the API, the worker and Postgres. The API migrates
-before each deploy. On Render the sandbox is a local process, since Render runs no
-Docker daemon. That is not isolation between tenants; untrusted workspaces need a
-worker with Docker.
+The console deploys to Vercel; `render.yaml` declares the API and Postgres, and the
+API migrates before each deploy. The worker runs on a Docker host
+(`deploy/worker/compose.yaml`), starting a sibling container per sandbox command from
+`docker/sandbox.Dockerfile`, because open sign-up means running strangers' test
+suites and Render has no Docker daemon. [launch.md](launch.md) is the sequence, and
+`pnpm launch:check` checks a running deployment.
+
+Billing: the console opens a Dodo Payments checkout (`POST /checkouts`) with the
+workspace in its metadata and records the session. Dodo's signed webhooks name a
+subscription; the API reads it back and applies it, so deliveries out of order or
+retried change nothing twice. `active` and `past_due` keep the paid plan; anything
+else returns the workspace to Free. The price shown on `/pricing` is read from the
+Dodo product.
 
 ## 12. The original plan (2026-09-13)
 

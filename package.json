@@ -30,6 +30,7 @@
     "probe:datadog": "pnpm --filter @pager/evals probe:datadog",
     "db:migrate": "pnpm --filter @pager/db migrate",
     "demo:e2e": "pnpm --filter @pager/evals e2e",
+    "launch:check": "node --experimental-strip-types --no-warnings evals/src/launch-check.ts",
     "bench": "pnpm --filter @pager/evals bench",
     "test:contract": "vitest run --config vitest.contract.config.ts"
   },

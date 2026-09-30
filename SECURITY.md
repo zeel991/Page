@@ -118,6 +118,15 @@ tenant table carries the workspace, and the isolation test suite checks each con
 route across two workspaces. Worker jobs build their providers from their own
 workspace's vault entries and installations.
 
+## Payments
+
+A workspace's plan changes only when Dodo Payments' own record of a subscription
+says so. A webhook is verified (Standard Webhooks: HMAC-SHA256 over id, timestamp
+and body, five-minute tolerance, constant-time compare), de-duplicated by its id, and
+used only to learn which subscription to read back from Dodo. The `?status=active` a
+browser returns with is never trusted by itself. Card details go to Dodo and never
+reach this system.
+
 ## Inbound webhooks
 
 GitHub's webhooks are verified by HMAC over the exact bytes received. Sentry's are
@@ -128,13 +137,20 @@ link-local and mapped address ranges refused.
 
 ## Known gaps
 
-- **The Render blueprint runs the sandbox as a local process**, because Render offers
-  no Docker daemon. That is containment of the environment and the process lifetime
-  only. It is acceptable for repositories you own, and **not isolation between
-  tenants**. Untrusted workspaces need the worker on a host with Docker and
-  `PAGER_SANDBOX_RUNNER=docker`.
-- `DockerRunner`'s arguments are unit-tested. It has not been run against a daemon in
-  this repository's CI.
+- **The local runner is not isolation.** Code it starts runs as the worker's own
+  user and can read the worker's environment through `/proc`, which holds the master
+  key, the database URL and the GitHub App key. The worker therefore refuses it
+  against a real database unless `PAGER_ALLOW_LOCAL_SANDBOX=1`, which is only for
+  deployments where every workspace is trusted. Open sign-up runs the worker on a
+  Docker host (`deploy/worker`), where it holds the daemon's socket: that is root on
+  the host, and repository code never shares its container.
+- The Docker sandbox's isolation is tested against a real daemon in CI
+  (`sandbox-docker`). A container shares the host's kernel; for a kernel boundary,
+  run gVisor (`PAGER_SANDBOX_DOCKER_RUNTIME=runsc`).
+- The dependency install is the one sandbox step with network, and that network is
+  Docker's default bridge. Lifecycle scripts are off, but a lockfile can name any
+  URL, so a hostile lockfile can reach what the host's bridge can reach. Firewall
+  the worker host's private ranges and cloud metadata address from the bridge.
 - There is no KMS integration yet; the master key is an environment variable.
 - Rate limits are per API instance and in memory: console routes 600 a minute per
   signed-in person, webhooks 600 a minute per sender address.

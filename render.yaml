@@ -1,5 +1,5 @@
-# Pager Developer on Render: the API and Postgres (and optionally the console, which
-# also deploys to Vercel). The worker runs on a Docker host: deploy/worker.
+# Pager Developer on Render: the API and Postgres. The console deploys to Vercel and
+# the worker to a Docker host (deploy/worker); docs/launch.md is the whole sequence.
 #
 # Everything a workspace configures (repositories, Datadog, Slack, services) lives in
 # the database and is set from the console. What is set here is the operator's: the
@@ -13,7 +13,7 @@
 
 envVarGroups:
   # Generated once and shared. PAGER_SESSION_SECRET must be identical in the console
-  # and the API; PAGER_MASTER_KEY in the API and the worker (it unwraps tenant
+  # (copy it to Vercel) and the API; PAGER_MASTER_KEY in the API and the worker (it unwraps tenant
   # secrets), so copy it into the worker host's worker.env. Render generates 256
   # random bits, base64 — the 32 bytes the key needs.
   - name: pager-secrets
@@ -34,36 +34,7 @@ databases:
 
 services:
   # ── Console ──────────────────────────────────────────────────────────────────
-  - type: web
-    name: pager-web
-    runtime: node
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm -r --filter './packages/**' build && pnpm --filter @pager/web build
-    startCommand: pnpm --filter @pager/web exec next start -H 0.0.0.0 -p $PORT
-    healthCheckPath: /
-    envVars:
-      - key: NODE_VERSION
-        value: "22"
-      - fromGroup: pager-secrets
-      - key: AUTH_SECRET
-        generateValue: true
-      - key: AUTH_TRUST_HOST
-        value: "true"
-      # This service's own public URL, e.g. https://pager-web.onrender.com
-      - key: AUTH_URL
-        sync: false
-      # The GitHub App's OAuth client (same values as GITHUB_APP_CLIENT_ID/SECRET).
-      - key: AUTH_GITHUB_ID
-        sync: false
-      - key: AUTH_GITHUB_SECRET
-        sync: false
-      # The API's URL, e.g. https://pager-api.onrender.com. Read at runtime.
-      - key: PAGER_API_URL
-        sync: false
-      # Shown on the pricing, legal and contact pages.
-      - key: PAGER_LEGAL_NAME
-        sync: false
-      - key: PAGER_SUPPORT_EMAIL
-        sync: false
+  # On Vercel (apps/web), not here. Its variables are listed in docs/launch.md.
 
   # ── API ──────────────────────────────────────────────────────────────────────
   - type: web
@@ -75,7 +46,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
-        value: "22"
+        value: "24"
       - fromGroup: pager-secrets
       - key: DATABASE_URL
         fromDatabase:

@@ -22,12 +22,17 @@ Your first sign-in creates a workspace. From there:
 3. Add a service: its repository, the health URL that reports its deployed commit,
    the Slack channel, and how much it may do.
 
+The free plan watches one service. Paid plans are bought in the console (Settings →
+Plan and billing) through Dodo Payments; see [pricing](https://page-iota-six.vercel.app/pricing).
+
 Nothing to connect yet? **Send a test incident** from the setup page. It runs a demo
 incident against built-in stand-ins for GitHub, Datadog and Slack: investigate,
 reproduce, patch, validate, stop at the approval. It doesn't count against your plan.
 
-Self-hosting: `render.yaml` deploys the console, the API, the worker and Postgres.
-Every variable is documented in `.env.example`.
+Self-hosting: [docs/launch.md](docs/launch.md) is the whole sequence: the console on
+Vercel, the API and Postgres on Render (`render.yaml`), the worker on a Docker host
+(`deploy/worker`), payments through Dodo. `pnpm launch:check` then asks the running
+services whether they are ready. Every variable is documented in `.env.example`.
 
 <p align="center">
   <img src="docs/landing.png" alt="The Pager Developer landing page" width="100%"/>
@@ -266,9 +271,17 @@ only what the operator owns:
 - optionally, an operator `ANTHROPIC_API_KEY`
 
 **Where a repository's code runs.** `PAGER_SANDBOX_RUNNER=docker` runs each command
-in its own container: no network (except the dependency install), a read-only root, a
-non-root uid, all capabilities dropped, CPU, memory and pid limits. The default,
-`local`, is **for development only**.
+in its own container from `docker/sandbox.Dockerfile`: no network (except the
+dependency install), a read-only root, the worker's own unprivileged uid, all
+capabilities dropped, CPU, memory and pid limits, only the sandbox's directories
+mounted. `local` runs it as the worker's own user, which can read the worker's
+credentials, so the worker refuses it against a real database unless
+`PAGER_ALLOW_LOCAL_SANDBOX=1` declares every workspace trusted.
+
+**The whole console, locally.** `pnpm --filter @pager/api dev:stack` runs the API
+against twins of GitHub, Slack and Dodo Payments (the Dodo twin hosts a checkout and
+a customer portal), so sign-up, onboarding and buying a plan can be clicked through
+with no account. It prints how to start the console against it.
 
 ## Security
 
@@ -281,13 +294,16 @@ The full threat model is in [SECURITY.md](SECURITY.md).
 
 - **No live-model benchmark is published.** The numbers above are scripted; they
   measure the pipeline, not a model's fixes. Nothing here claims a model fix rate.
-- **The Render blueprint's sandbox is a local process.** Render runs no Docker
-  daemon, so repository code runs on the worker host with only its environment and
-  lifetime contained. That is fine for repositories you own; it is not isolation
-  between tenants.
-- **Not run against a Docker daemon.** `DockerRunner` builds exactly the command it
-  should (unit-tested), but has not been run against a daemon here. Installs inside
-  Docker need an image with the package manager (corepack for pnpm and yarn).
+- **The Docker sandbox is proven in CI, not on a laptop.** CI's `sandbox-docker` job
+  runs the isolation tests and every end-to-end demo inside containers, against
+  GitHub's runners' daemon. The worker host itself (`deploy/worker`) is yours to run.
+  Bun is not in the sandbox image.
+- **Payments against Dodo's real API are untested here.** Billing is verified
+  through the API against a Dodo twin, and by hand in a browser against it; the
+  opt-in contract tests for Dodo's test mode have not been run (no key here).
+- **The policies are drafts.** `/terms`, `/privacy` and `/refunds` describe what the
+  code does and commit the operator to a 14-day refund window and 30-day deletion;
+  they need a lawyer's review before live payments.
 - **Not run against live accounts.** The contract suite exists and has not been run
   against live GitHub, Slack, Datadog or Sentry accounts. Everything else is verified
   against the local twins.
@@ -295,7 +311,7 @@ The full threat model is in [SECURITY.md](SECURITY.md).
   and sign-in pages; the flow behind sign-in was verified locally against twins, not
   on the hosted deployment.
 - **Languages:** TypeScript and JavaScript (node:test, vitest, jest; npm, pnpm, yarn,
-  bun) and Python (pytest; uv, or a requirements file pinned with `==`). Nothing else
+  bun on the host runner only) and Python (pytest; uv, or a requirements file pinned with `==`). Nothing else
   yet. Private package registries are not supported. A manifest without a lockfile is
   not installed.
 - **Alert sources:** Datadog monitors and Sentry issues. Sentry's "alerting" is a
@@ -303,12 +319,14 @@ The full threat model is in [SECURITY.md](SECURITY.md).
   self-hosted Sentry needs the operator to allow its URL.
 - **Arga's hosted GitHub twin** does not compute diffs and almost certainly cannot
   serve `git clone`, which the sandbox now needs (untested).
-- **Plans and billing:** plan limits are placeholders, and Stripe is not wired.
+- **Plans:** the limits are the seeded rows in `plans` (Free: 1 service, 10
+  incidents a month; Team: 25 and 500). A workspace that drops to Free keeps the
+  services it has; the limit applies to adding more.
 - **The master key** is an environment variable; there is no KMS integration yet.
-- **No per-client rate limiting** on the API's routes.
+- **Rate limits** are in memory and per API instance.
 
 ---
 
 <p align="center">
-  <sub>7 packages · 3 apps · 57 test files · 664 tests (pnpm verify) · MIT</sub>
+  <sub>7 packages · 3 apps · 62 test files · 689 tests (pnpm verify; 6 more run in CI against Docker) · MIT</sub>
 </p>
