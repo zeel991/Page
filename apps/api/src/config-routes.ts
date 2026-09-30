@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { isDatadogApiUrl, serviceConfigProblems, type ServiceConfig } from '@pager/core';
+import { isDatadogApiUrl, isSentryApiUrl, serviceConfigProblems, type ServiceConfig } from '@pager/core';
 import {
   InstallationRepository,
   IntegrationRepository,
@@ -23,6 +23,7 @@ import {
   testDatadog,
   testNotion,
   testResend,
+  testSentry,
   type ConnectionResult,
   type GitHubAppClient,
   type SlackAppClient,
@@ -41,6 +42,8 @@ import { auth, requireRole } from './auth.ts';
 export interface ConfigPolicy {
   /** Which Datadog base URLs a workspace may configure. Default: Datadog's own API hosts only. */
   allowDatadogUrl?: (url: string) => boolean;
+  /** Which Sentry base URLs a workspace may configure. Default: sentry.io and its regional hosts. */
+  allowSentryUrl?: (url: string) => boolean;
   /** Health URLs are tenant input; private addresses are refused unless this is set, for tests. */
   allowPrivateHealthUrl?: boolean;
   /** Base URLs for Notion and Resend, for tests against the twin. */
@@ -63,6 +66,13 @@ const Datadog = z.object({
   apiKey: z.string().min(16).optional(),
   appKey: z.string().min(16).optional(),
 });
+const Sentry = z.object({
+  baseUrl: z.string().url().default('https://sentry.io'),
+  organization: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'an organization slug'),
+  token: z.string().min(16).optional(),
+  /** The integration's client secret, which signs Sentry's webhooks. */
+  webhookSecret: z.string().min(16).optional(),
+});
 const Notion = z.object({ token: z.string().min(8) });
 const Resend = z.object({ apiKey: z.string().min(8), from: z.string().email().or(z.string().regex(/^.+<[^@\s]+@[^@\s]+>$/)) });
 const Anthropic = z.object({ apiKey: z.string().min(16) });
@@ -74,6 +84,7 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
   const slack = new SlackRepository(deps.db);
   const policy = deps.policy ?? {};
   const allowDatadog = policy.allowDatadogUrl ?? isDatadogApiUrl;
+  const allowSentry = policy.allowSentryUrl ?? isSentryApiUrl;
   const org = (request: FastifyRequest) => auth(request).organizationId;
 
   // ── Integrations ─────────────────────────────────────────────────────────────
@@ -94,6 +105,7 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
       github: { installations: (await installations.active(o)).map((i) => ({ id: i.id, accountLogin: i.accountLogin })) },
       slack: slackRow ? { teamId: slackRow.teamId, teamName: slackRow.teamName } : null,
       datadog: status('datadog'),
+      sentry: status('sentry'),
       notion: status('notion'),
       resend: status('resend'),
       anthropic: status('anthropic'),
@@ -112,6 +124,20 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
     if (parsed.data.appKey) await deps.vault.put(o, 'datadog.app_key', parsed.data.appKey);
     const row = await integrations.upsert(o, 'datadog', { baseUrl: site });
     return { integration: { provider: row.provider, baseUrl: row.baseUrl } };
+  });
+
+  app.put('/api/integrations/sentry', async (request, reply) => {
+    if (!requireRole(request, reply, ['owner', 'admin'])) return reply;
+    const parsed = Sentry.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'organization must be a Sentry organization slug; token at least 16 characters' });
+    const baseUrl = parsed.data.baseUrl.replace(/\/+$/, '');
+    // The token is sent to this URL, so it must be Sentry's own API.
+    if (!allowSentry(baseUrl)) return reply.code(422).send({ problems: { baseUrl: 'must be https://sentry.io or a regional Sentry host' } });
+    const o = org(request);
+    if (parsed.data.token) await deps.vault.put(o, 'sentry.auth_token', parsed.data.token);
+    if (parsed.data.webhookSecret) await deps.vault.put(o, 'sentry.webhook_secret', parsed.data.webhookSecret);
+    const row = await integrations.upsert(o, 'sentry', { baseUrl, config: { organization: parsed.data.organization } });
+    return { integration: { provider: row.provider, baseUrl: row.baseUrl, organization: parsed.data.organization } };
   });
 
   app.put('/api/integrations/notion', async (request, reply) => {
@@ -153,6 +179,15 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
         result = !row?.baseUrl || !apiKey || !appKey
           ? { ok: false, error: 'Datadog needs a site, an API key and an application key' }
           : await testDatadog({ site: row.baseUrl, apiKey, appKey }, policy.fetchImpl);
+        break;
+      }
+      case 'sentry': {
+        const row = await integrations.get(o, 'sentry');
+        const token = await deps.vault.reveal(o, 'sentry.auth_token');
+        const organization = typeof row?.config.organization === 'string' ? row.config.organization : null;
+        result = !row?.baseUrl || !token || !organization
+          ? { ok: false, error: 'Sentry needs a base URL, an organization and an auth token' }
+          : await testSentry({ baseUrl: row.baseUrl, token, organization }, policy.fetchImpl);
         break;
       }
       case 'notion': {
@@ -227,7 +262,7 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
     const problems: Record<string, string> = {};
     const repo = (await installations.repositories(o)).find((r) => r.id === config.repositoryId && !r.detachedAt);
     if (!repo) problems.repositoryId = 'not a repository picked in this workspace';
-    if (!(await integrations.get(o, 'datadog'))) problems.alertSource = 'connect Datadog first';
+    if (!(await integrations.get(o, config.alertSource))) problems.alertSource = `connect ${config.alertSource === 'sentry' ? 'Sentry' : 'Datadog'} first`;
     const token = await deps.vault.reveal(o, 'slack.bot_token');
     if (!token || !deps.slack) {
       problems.slackChannelId = 'connect Slack first';
@@ -256,6 +291,9 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
     const o = org(request);
     const more = await crossCheck(o, config);
     if (Object.keys(more).length > 0) return reply.code(422).send({ problems: more });
+    if ((await services.list(o)).some((svc) => svc.name === config.name)) {
+      return reply.code(422).send({ problems: { name: 'this workspace already has a service with this name' } });
+    }
     return { service: await services.create(o, config) };
   });
 
@@ -293,10 +331,11 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
   // ── Onboarding: each step's real state, read from what exists ───────────────
   app.get('/api/onboarding', async (request) => {
     const o = org(request);
-    const [installs, repos, dd, slackRow, svcs, usageNow, sampleJob] = await Promise.all([
+    const [installs, repos, ddRow, sentryRow, slackRow, svcs, usageNow, sampleJob] = await Promise.all([
       installations.active(o),
       installations.repositories(o),
       integrations.get(o, 'datadog'),
+      integrations.get(o, 'sentry'),
       slack.forOrganization(o),
       services.list(o),
       plans.usage(o),
@@ -304,6 +343,8 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
     ]);
     const watched = svcs.filter((s) => s.alertSource !== 'sample');
     const service = watched[0] ?? null;
+    // The alert source the service uses, or whichever one is connected before there is a service.
+    const dd = service?.alertSource === 'sentry' ? sentryRow : service ? ddRow : (ddRow?.verifiedAt ? ddRow : sentryRow?.verifiedAt ? sentryRow : ddRow ?? sentryRow);
     const polledRecently =
       service?.lastPolledAt && Date.now() - service.lastPolledAt.getTime() < 3 * service.intervalSeconds * 1000;
     const step = (id: string, label: string, status: 'done' | 'todo' | 'attention', detail: string | null = null) => ({ id, label, status, detail });
@@ -314,7 +355,7 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
         step('repository', 'Pick a repository', repos.some((r) => !r.detachedAt) ? 'done' : 'todo', repos.filter((r) => !r.detachedAt).map((r) => r.fullName).join(', ') || null),
         step(
           'datadog',
-          'Connect Datadog',
+          'Connect Datadog or Sentry',
           !dd ? 'todo' : dd.verifiedAt ? 'done' : 'attention',
           !dd ? null : dd.verifiedAt ? `verified ${dd.verifiedAt.toISOString()}` : dd.lastError ?? 'connected, not yet tested',
         ),

@@ -16,10 +16,16 @@ import { z } from 'zod';
  *    path by which a model can mint an Evidence row from its own output.
  */
 
+/**
+ * Observability evidence is named for what it is — a metric, a log or error read,
+ * an alert — not for the vendor it came from. Which backend supplied it is the
+ * `backend` field, so a claim can say "Sentry" or "Datadog" without the domain
+ * being shaped around either.
+ */
 export const EvidenceKind = z.enum([
-  'DATADOG_METRIC',
-  'DATADOG_LOG',
-  'DATADOG_MONITOR',
+  'OBS_METRIC',
+  'OBS_LOG',
+  'OBS_ALERT',
   'STACK_TRACE',
   'CODE_DIFF',
   'COMMIT',
@@ -45,6 +51,8 @@ export const Evidence = z.object({
   id: z.string(),
   incidentId: z.string(),
   kind: EvidenceKind,
+  /** For OBS_* evidence: the backend that produced it, e.g. "datadog" or "sentry". */
+  backend: z.string().nullable().optional(),
   provenance: EvidenceProvenance,
   /** Short human-readable statement of what this evidence shows. */
   summary: z.string().min(1),

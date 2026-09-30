@@ -70,6 +70,7 @@ function workflowFor(c: JobContext, tenant: Tenant, incidentId: () => string | n
   const agents = c.agentsFor(tenant, { incidentId });
   return new IncidentWorkflow({
     observability: tenant.observability,
+    alerts: tenant.alerts,
     sourceControl: tenant.sourceControl,
     messaging: tenant.messaging,
     issueTracker: null,
@@ -128,8 +129,8 @@ async function poll(c: JobContext, job: JobRow): Promise<JobOutcome> {
   const probe = await probeDeployedRevision(tenant.service.healthUrl!, { allowPrivate: c.op.allowPrivateHealthUrl });
   if (!probe.sha) {
     // "A monitor is red and we cannot see what is deployed" must not look like "all quiet".
-    const alerting = await tenant.observability
-      .listMonitors(tenant.service.name)
+    const alerting = await tenant.alerts
+      .listAlerts(tenant.service.name)
       .then((ms) => ms.filter((m) => m.status === 'ALERT').map((m) => m.name))
       .catch(() => [] as string[]);
     await record(
@@ -142,7 +143,7 @@ async function poll(c: JobContext, job: JobRow): Promise<JobOutcome> {
 
   const runs = new RevisionRunRepository(c.op.db);
 
-  const watcher = new ProductionWatcher(tenant.observability, tenant.knowledge);
+  const watcher = new ProductionWatcher(tenant.alerts, tenant.knowledge);
   const alert = await tenant.tracer.run('ProductionWatcher', { input: { service: tenant.service.name } }, (ctx) =>
     watcher.check(ctx, tenant.service.name, c.op.now ? { now: c.op.now } : {}),
   );

@@ -2,6 +2,8 @@ import type { Environment } from '@pager/core';
 import { Http } from '../http.js';
 import { LOG_FACETS, type LogFacet } from '../types.js';
 import type {
+  AlertSource,
+  ObservedErrors,
   LogEntries,
   LogEntry,
   MetricName,
@@ -28,7 +30,7 @@ import type {
  * labelled `ratio`, so a tolerance meant as "half a percentage point" was applied to
  * a per-second count, and a quiet service read as healthy whatever its error ratio.
  */
-export const METRIC_QUERIES: Record<MetricName, (service: string) => string> = {
+export const DDTRACE_METRIC_QUERIES: Record<MetricName, (service: string) => string> = {
   error_rate: (s) =>
     `sum:trace.http.request.errors{service:${s}}.as_count() / sum:trace.http.request.hits{service:${s}}.as_count()`,
   http_5xx_rate: (s) =>
@@ -41,6 +43,9 @@ export const METRIC_QUERIES: Record<MetricName, (service: string) => string> = {
   cpu_utilization: (s) => `avg:system.cpu.user{service:${s}}`,
   memory_utilization: (s) => `avg:system.mem.pct_usable{service:${s}}`,
 };
+
+/** @deprecated The ddtrace defaults; a service may override them (`metricQueries`). */
+export const METRIC_QUERIES = DDTRACE_METRIC_QUERIES;
 
 const RATIO_METRICS = new Set<MetricName>(['error_rate', 'http_5xx_rate']);
 
@@ -128,15 +133,25 @@ export interface DatadogProviderOptions {
   appKey?: string;
   environment?: Environment;
   fetchImpl?: typeof globalThis.fetch;
+  /**
+   * How each metric is queried. The defaults are ddtrace's APM metrics; a service
+   * instrumented differently (OpenTelemetry, custom names) overrides them here
+   * rather than the domain knowing Datadog's metric names.
+   */
+  metricQueries?: Partial<Record<MetricName, (service: string) => string>>;
 }
 
-export class DatadogProvider implements ObservabilityProvider {
+export class DatadogProvider implements ObservabilityProvider, AlertSource {
   readonly kind = 'observability' as const;
+  readonly backend = 'datadog' as const;
+  readonly alertNoun = 'Datadog monitor';
   private readonly http: Http;
   private readonly environment: Environment;
+  private readonly queries: Record<MetricName, (service: string) => string>;
 
   constructor(opts: DatadogProviderOptions) {
     this.environment = opts.environment ?? 'production';
+    this.queries = { ...DDTRACE_METRIC_QUERIES, ...(opts.metricQueries ?? {}) };
     this.http = new Http({
       baseUrl: opts.baseUrl,
       headers: {
@@ -151,7 +166,7 @@ export class DatadogProvider implements ObservabilityProvider {
     const res = await this.http.get<DdQueryResponse>('/api/v1/query', {
       from: Math.floor(range.from.getTime() / 1000),
       to: Math.floor(range.to.getTime() / 1000),
-      query: METRIC_QUERIES[metric](tagValue('service', service)),
+      query: this.queries[metric](tagValue('service', service)),
     });
 
     // A Datadog query can return 200 with an error payload. Treating that as an
@@ -249,6 +264,15 @@ export class DatadogProvider implements ObservabilityProvider {
    *
    * Both are queried and the results merged by id.
    */
+  listAlerts(service: string): Promise<MonitorState[]> {
+    return this.listMonitors(service);
+  }
+
+  /** Error logs, for the watcher to cluster: Datadog's logs are text. */
+  async readErrors(service: string, range: TimeRange, opts: { limit?: number } = {}): Promise<ObservedErrors> {
+    return { kind: 'logs', logs: await this.queryLogs(service, range, { level: 'error', limit: opts.limit ?? 200 }) };
+  }
+
   async listMonitors(service: string): Promise<MonitorState[]> {
     const [tagged, scoped] = await Promise.all([
       this.http.get<DdMonitor[]>('/api/v1/monitor', { monitor_tags: `service:${tagValue('service', service)}` }),

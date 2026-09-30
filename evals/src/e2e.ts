@@ -24,8 +24,10 @@ import {
   NotionProvider,
   PAGER_APP_MANIFEST,
   ResendProvider,
+  SentryProvider,
   SlackProvider,
   registerViaManifest,
+  type AlertSource,
   type DeploymentRecord,
   type ObservabilityProvider,
 } from '@pager/providers';
@@ -34,13 +36,13 @@ import { IncidentWorkflow, SCRIPTS, ScriptedPatchGenerator } from '@pager/agents
 import { DirectoryDependencyCache } from '@pager/sandbox';
 import { FIXTURES, LocalTwinServer, seedFromFixture, type ScenarioFixture } from '@pager/twin-local';
 
-export type AlertSource = 'datadog';
-export const ALERT_SOURCES: readonly AlertSource[] = ['datadog'];
+export type AlertSourceName = 'datadog' | 'sentry';
+export const ALERT_SOURCES: readonly AlertSourceName[] = ['datadog', 'sentry'];
 export const E2E_FIXTURES = ['INC-001', 'INC-021', 'INC-020'] as const;
 
 export interface E2eRow {
   fixture: string;
-  source: AlertSource;
+  source: AlertSourceName;
   language: string;
   dependencies: string;
   baseline: string;
@@ -53,14 +55,24 @@ export interface E2eRow {
   seconds: number;
 }
 
-function observabilityFor(source: AlertSource, endpoints: { datadog: string }): ObservabilityProvider {
+const SCENARIO_NOW = new Date('2026-09-13T15:10:00Z');
+
+/**
+ * Metrics always come from the Datadog twin; what differs is where the incident is
+ * noticed. With Sentry that is its issues and events — a real configuration, since
+ * Sentry has no request metrics of ours.
+ */
+function providersFor(source: AlertSourceName, e: { datadog: string; sentry: string }): { observability: ObservabilityProvider; alerts: AlertSource } {
+  const datadog = new DatadogProvider({ baseUrl: e.datadog });
   switch (source) {
     case 'datadog':
-      return new DatadogProvider({ baseUrl: endpoints.datadog });
+      return { observability: datadog, alerts: datadog };
+    case 'sentry':
+      return { observability: datadog, alerts: new SentryProvider({ baseUrl: e.sentry, token: 'sntrys_e2e', organization: 'acme', now: () => SCENARIO_NOW }) };
   }
 }
 
-export async function runOne(id: string, source: AlertSource, cacheDir: string): Promise<E2eRow> {
+export async function runOne(id: string, source: AlertSourceName, cacheDir: string): Promise<E2eRow> {
   const started = Date.now();
   const fixture: ScenarioFixture = FIXTURES[id]!;
   const script = SCRIPTS[id];
@@ -74,14 +86,14 @@ export async function runOne(id: string, source: AlertSource, cacheDir: string):
     const tokens = new GitHubAppTokenSource(e.github, creds);
     const sourceControl = new GitHubProvider({ baseUrl: e.github, tokenProvider: () => tokens.token() });
     const workflow = new IncidentWorkflow({
-      observability: observabilityFor(source, e),
+      ...providersFor(source, e),
       sourceControl,
       messaging: new SlackProvider({ baseUrl: e.slack }),
       issueTracker: new JiraProvider({ baseUrl: e.jira, projectKey: 'INC' }),
       knowledge: new NotionProvider({ baseUrl: e.notion, token: 't', parentPageId: 'postmortems' }),
       email: new ResendProvider({ baseUrl: e.resend, apiKey: 're_t', from: 'pager@acme.dev' }),
       tracer: new AgentTracer({ sink: new InMemorySink(), lemma: null }),
-      now: () => new Date('2026-09-13T15:10:00Z'),
+      now: () => SCENARIO_NOW,
       patchGenerator: new ScriptedPatchGenerator(script),
       dependencyCache: new DirectoryDependencyCache(cacheDir),
     });

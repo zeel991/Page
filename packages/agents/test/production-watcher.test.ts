@@ -138,8 +138,8 @@ describe('ProductionWatcher', () => {
     await t.run('ProductionWatcher', {}, (ctx) => watcher().check(ctx, 'checkout-api', { now: FIXTURE_NOW }));
 
     const names = sink.toolCalls.map((c) => c.toolName);
-    expect(names).toContain('datadog.listMonitors');
-    expect(names).toContain('datadog.queryLogs');
+    expect(names).toContain('observability.listAlerts');
+    expect(names).toContain('observability.readErrors');
     expect(sink.failedToolCalls()).toHaveLength(0);
   });
 });
@@ -203,9 +203,10 @@ describe('ProductionWatcher with several distinct failures', () => {
   });
   const observability = (logs: ReturnType<typeof entry>[]) =>
     ({
-      kind: 'observability',
-      listMonitors: async () => [{ id: 'm1', name: 'svc errors', status: 'ALERT', transitionedAt: at, query: '', message: '' }],
-      queryLogs: async () => Object.assign(logs, { truncated: false }),
+      backend: 'datadog',
+      alertNoun: 'Datadog monitor',
+      listAlerts: async () => [{ id: 'm1', name: 'svc errors', status: 'ALERT', transitionedAt: at, query: '', service: 'svc' }],
+      readErrors: async () => ({ kind: 'logs', logs: Object.assign(logs, { truncated: false }) }),
     }) as unknown as ConstructorParameters<typeof ProductionWatcher>[0];
 
   it('reports one failure per root frame, loudest first, each assessed for novelty', async () => {

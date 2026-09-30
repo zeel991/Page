@@ -3,7 +3,7 @@ import { api } from '@/lib/api';
 import { PageHeader, Panel, dateOf } from '@/components/ui';
 import { ActionForm } from '@/components/console/action-form';
 import { Field, INPUT } from '@/components/console/fields';
-import { saveAnthropic, saveBudget, saveDatadog, saveNotion, saveResend, testIntegration } from '../actions';
+import { saveAnthropic, saveBudget, saveDatadog, saveNotion, saveResend, saveSentry, testIntegration } from '../actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,6 +20,7 @@ interface Integrations {
   github: { installations: { id: string; accountLogin: string }[] };
   slack: { teamId: string; teamName: string } | null;
   datadog: IntegrationStatus;
+  sentry: IntegrationStatus;
   notion: IntegrationStatus;
   resend: IntegrationStatus;
   anthropic: IntegrationStatus;
@@ -76,6 +77,7 @@ export default async function SettingsPage() {
   const hosts = [...DATADOG_API_HOSTS];
   const site = i.datadog.baseUrl ?? 'https://api.datadoghq.com';
   const resendFrom = typeof i.resend.config?.from === 'string' ? i.resend.config.from : '';
+  const sentryOrg = typeof i.sentry.config?.organization === 'string' ? i.sentry.config.organization : '';
 
   return (
     <div className="space-y-6">
@@ -111,6 +113,23 @@ export default async function SettingsPage() {
           </Field>
           <Field label="Application key" hint="Needs read access to monitors, metrics and logs.">
             <input name="appKey" type="password" autoComplete="off" className={INPUT} />
+          </Field>
+        </ActionForm>
+      </Section>
+
+      <Section id="sentry" title="Sentry" subtitle="an alternative alert source: new and regressed issues" status={i.sentry} provider="sentry">
+        <ActionForm action={saveSentry} submit="Save Sentry" className="space-y-3">
+          <Field label="Sentry URL" hint="https://sentry.io, or your region's host (https://us.sentry.io, https://de.sentry.io).">
+            <input name="baseUrl" defaultValue={i.sentry.baseUrl ?? 'https://sentry.io'} className={INPUT} />
+          </Field>
+          <Field label="Organization slug">
+            <input name="organization" defaultValue={sentryOrg} required className={INPUT} placeholder="acme" />
+          </Field>
+          <Field label="Auth token" hint={i.sentry.configured ? 'Leave blank to keep the stored token. Needs event:read and project:read.' : 'Needs event:read and project:read.'}>
+            <input name="token" type="password" autoComplete="off" className={INPUT} />
+          </Field>
+          <Field label="Webhook client secret" hint="Optional. With it, Sentry's issue webhooks (to /webhooks/sentry on the API) wake the poll at once.">
+            <input name="webhookSecret" type="password" autoComplete="off" className={INPUT} />
           </Field>
         </ActionForm>
       </Section>

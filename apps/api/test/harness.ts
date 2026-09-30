@@ -56,6 +56,7 @@ export async function harness(extra: Partial<AppDeps> = {}): Promise<Harness> {
     // and public https health URLs.
     configPolicy: {
       allowDatadogUrl: (url) => url === endpoints.datadog,
+      allowSentryUrl: (url) => url === endpoints.sentry,
       allowPrivateHealthUrl: true,
       notionBaseUrl: endpoints.notion,
       resendBaseUrl: endpoints.resend,

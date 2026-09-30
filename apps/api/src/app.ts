@@ -6,6 +6,7 @@ import { registerSlackRoutes } from './slack-routes.ts';
 import { registerConfigRoutes, type ConfigPolicy } from './config-routes.ts';
 import { registerCredentialRoutes } from './credential-routes.ts';
 import { registerGitHubRoutes, registerGitHubWebhook } from './github-routes.ts';
+import { registerSentryWebhook } from './sentry-webhook.ts';
 import { internalGuard, sessionGuard } from './auth.ts';
 import { registerInternalRoutes } from './internal-routes.ts';
 import { registerConsoleRoutes } from './routes.ts';
@@ -64,6 +65,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   // Callers that are not the console: authenticated by their own signatures.
   await app.register(async (scoped) => {
     await registerGitHubWebhook(scoped, { db: deps.db, github: deps.github ?? null });
+    await registerSentryWebhook(scoped, { db: deps.db, vault: deps.vault });
   });
   await app.register(async (scoped) => {
     scoped.addHook('preHandler', internal);

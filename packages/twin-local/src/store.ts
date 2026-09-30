@@ -196,6 +196,17 @@ export interface TwinState {
    * The Slack workspace the twin plays, the app it accepts OAuth from, and the bot
    * tokens and codes it has issued.
    */
+  /**
+   * Sentry. Its issues and events are derived from `logs` — the same error logs the
+   * Datadog twin serves — so one scenario can be triggered through either backend.
+   */
+  sentry: {
+    organization: string;
+    /** Per-token requests allowed per window before 429 + Retry-After. */
+    rateLimit: { max: number; windowMs: number };
+    /** Page sizes, small enough that pagination is exercised. */
+    pageSize: { issues: number; events: number };
+  };
   slack: {
     team: { id: string; name: string };
     app: { clientId: string; clientSecret: string };
@@ -314,6 +325,7 @@ export function emptyState(): TwinState {
     blobs: new Map(),
     trees: new Map(),
     emails: [],
+    sentry: { organization: 'acme', rateLimit: { max: 1000, windowMs: 1000 }, pageSize: { issues: 10, events: 25 } },
     slack: {
       team: { id: 'T0TWIN', name: 'Acme' },
       app: { clientId: 'twin-slack-client', clientSecret: 'twin-slack-secret' },
@@ -356,6 +368,7 @@ export function cloneState(state: TwinState): TwinState {
     emails: state.emails.map((e) => ({ ...e, to: [...e.to] })),
     ...(state.limits ? { limits: { ...state.limits } } : {}),
     ...(state.databases ? { databases: state.databases.map((d) => ({ ...d })) } : {}),
+    sentry: { organization: state.sentry.organization, rateLimit: { ...state.sentry.rateLimit }, pageSize: { ...state.sentry.pageSize } },
     slack: {
       team: { ...state.slack.team },
       app: { ...state.slack.app },

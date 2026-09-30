@@ -408,6 +408,8 @@ export const evidence = pgTable('evidence', {
   organizationId: uuid('organization_id').notNull().references(() => organizations.id),
   incidentId: uuid('incident_id').notNull().references(() => incidents.id, { onDelete: 'cascade' }),
   kind: text('kind').notNull(),
+  /** For OBS_* evidence: which backend produced it ("datadog", "sentry"). */
+  backend: text('backend'),
   provenance: provenanceEnum('provenance').notNull(),
   summary: text('summary').notNull(),
   sourceToolCallId: uuid('source_tool_call_id').notNull().references(() => toolCalls.id),

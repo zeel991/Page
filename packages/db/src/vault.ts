@@ -17,7 +17,10 @@ export type CredentialKind =
   | 'slack.bot_token'
   | 'anthropic.api_key'
   | 'notion.token'
-  | 'resend.api_key';
+  | 'resend.api_key'
+  | 'sentry.auth_token'
+  /** Verifies Sentry's webhook signatures (the integration's client secret). */
+  | 'sentry.webhook_secret';
 
 export interface CredentialSummary {
   kind: CredentialKind;

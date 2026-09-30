@@ -81,6 +81,13 @@ describe('services', () => {
     expect(Object.keys((res.json() as { problems: Record<string, string> }).problems)).toContain(field);
   });
 
+  it('refuses a second service with the same name, as a field problem rather than a server error', async () => {
+    const { session, repositoryId } = await onboard(h, { healthUrl: health.url });
+    const res = await h.call('POST', '/api/services', session.token, { name: 'checkout-api', repositoryId, healthUrl: health.url, slackChannelId: '#incidents' });
+    expect(res.statusCode).toBe(422);
+    expect(res.json()).toMatchObject({ problems: { name: 'this workspace already has a service with this name' } });
+  });
+
   it('refuses a channel the Slack bot cannot see, and a repository from another workspace', async () => {
     const { session, repositoryId } = await onboard(h, { healthUrl: health.url });
     const noChannel = await h.call('POST', '/api/services', session.token, { name: 'x', repositoryId, healthUrl: health.url, slackChannelId: '#nowhere' });

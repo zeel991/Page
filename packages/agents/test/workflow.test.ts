@@ -7,6 +7,7 @@ import {
   NotionProvider,
   PAGER_APP_MANIFEST,
   ResendProvider,
+  SentryProvider,
   SlackProvider,
   registerViaManifest,
 } from '@pager/providers';
@@ -21,6 +22,7 @@ import {
   telemetryWindowsFor,
 } from '../src/workflow.js';
 import { NoPatchGenerator, ScriptedPatchGenerator } from '../src/patch-generator.js';
+import { SCRIPTS } from '../src/sample-scripts.js';
 
 let server: LocalTwinServer;
 
@@ -122,6 +124,36 @@ const input = {
 
 afterEach(async () => {
   await server?.stop();
+});
+
+describe('Sentry as the alert source', () => {
+  it('is noticed through Sentry’s issues, reads its structured frames, and says Sentry in the pull request', async () => {
+    const { deployment, endpoints } = await build(INC_001, 'scripted');
+    const tokens = new GitHubAppTokenSource(endpoints.github, await registerViaManifest(endpoints.github, PAGER_APP_MANIFEST(endpoints.github)));
+    const sink = new InMemorySink();
+    const workflow = new IncidentWorkflow({
+      observability: new DatadogProvider({ baseUrl: endpoints.datadog }),
+      alerts: new SentryProvider({ baseUrl: endpoints.sentry, token: 'sntrys_test', organization: 'acme', now: () => new Date('2026-09-13T15:10:00Z') }),
+      sourceControl: new GitHubProvider({ baseUrl: endpoints.github, tokenProvider: () => tokens.token() }),
+      messaging: new SlackProvider({ baseUrl: endpoints.slack }),
+      issueTracker: null,
+      knowledge: null,
+      email: null,
+      tracer: new AgentTracer({ sink, lemma: null }),
+      now: () => new Date('2026-09-13T15:10:00Z'),
+      patchGenerator: new ScriptedPatchGenerator(SCRIPTS['INC-001']!),
+    });
+    const result = await workflow.run({ ...input, deployment });
+    expect(result.haltReason).toBeNull();
+    expect(result.alert).toMatchObject({ backend: 'sentry', alertNoun: 'Sentry issue' });
+    expect(result.alert!.primary!.topApplicationFrame).toMatchObject({ file: 'src/checkout/service.ts', line: 20, functionName: 'CheckoutService.createOrder' });
+    const tools = sink.toolCalls.map((c) => c.toolName);
+    expect(tools).toEqual(expect.arrayContaining(['observability.listAlerts', 'observability.readErrors']));
+    expect(tools.some((t) => t.startsWith('datadog.'))).toBe(false);
+    const pr = server.current.repositories.get('acme/checkout-api')!.pullRequests.find((p) => p.number === result.pullRequest!.number)!;
+    expect(pr.body).toMatch(/Sentry issue "CHECKOUT-API-1: TypeError/);
+    expect(pr.body).not.toMatch(/Datadog monitor/);
+  });
 });
 
 describe('repositories that are not the demo', () => {

@@ -198,8 +198,66 @@ export interface TimeRange {
   to: Date;
 }
 
+/** Where telemetry and alerts come from. Named in evidence, so every claim says which backend it rests on. */
+export type ObservabilityBackend = 'datadog' | 'sentry';
+
+/** A frame the backend itself parsed (Sentry's SDKs do), rather than one read out of text. */
+export interface ObservedFrame {
+  file: string;
+  line: number | null;
+  column: number | null;
+  functionName: string | null;
+  /** The backend's own judgement that this frame is application code. */
+  inApp: boolean;
+}
+
+/**
+ * One group of errors as a backend reports it: Sentry's issue, with its latest
+ * event's exception. Structured, so it becomes an error cluster without any text
+ * parsing.
+ */
+export interface ObservedErrorGroup {
+  id: string;
+  errorType: string | null;
+  message: string;
+  /** Innermost first. */
+  frames: ObservedFrame[];
+  /** Events in the window read, a lower bound when the read was truncated. */
+  count: number;
+  firstSeen: Date;
+  lastSeen: Date;
+  routes: string[];
+  url: string | null;
+}
+
+/**
+ * The errors behind an alert: log lines for the watcher to cluster, or groups the
+ * backend has already structured.
+ */
+export type ObservedErrors =
+  | { kind: 'logs'; logs: LogEntries }
+  | { kind: 'groups'; groups: ObservedErrorGroup[]; truncated: boolean | null };
+
+/**
+ * Where incidents are noticed: a monitor alerting, an issue unresolved and active.
+ *
+ * Polled by the worker; a backend that can push (Sentry's webhooks) wakes the poll
+ * rather than bypassing it, so both paths reach the same decision with the same
+ * evidence.
+ */
+export interface AlertSource {
+  readonly backend: ObservabilityBackend;
+  /** What alerted, for a person: "Datadog monitor", "Sentry issue". */
+  readonly alertNoun: string;
+  /** What is alerting for a service, now. */
+  listAlerts(service: string): Promise<MonitorState[]>;
+  /** The errors a service produced in a window. */
+  readErrors(service: string, range: TimeRange, opts?: { limit?: number }): Promise<ObservedErrors>;
+}
+
 export interface ObservabilityProvider {
   readonly kind: 'observability';
+  readonly backend: ObservabilityBackend;
   queryMetric(
     service: string,
     metric: MetricName,

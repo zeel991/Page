@@ -1,14 +1,16 @@
 import type {
+  AlertSource,
   KnowledgeProvider,
   LogEntry,
   MonitorState,
-  ObservabilityProvider,
+  ObservabilityBackend,
   TimeRange,
 } from '@pager/providers';
 import type { AgentRunContext } from '@pager/observability';
 import {
   assessNovelty,
   clusterErrors,
+  clustersFromGroups,
   failureKey,
   type ErrorCluster,
   type KnownFailureMode,
@@ -30,6 +32,9 @@ import {
 
 export interface ProductionAlert {
   service: string;
+  /** Which backend noticed, and what it calls what alerted ("Datadog monitor", "Sentry issue"). */
+  backend: ObservabilityBackend;
+  alertNoun: string;
   monitor: MonitorState;
   firedAt: Date;
   logWindow: TimeRange;
@@ -127,7 +132,7 @@ export function extractKnownFailureModes(
 
 export class ProductionWatcher {
   constructor(
-    private readonly observability: ObservabilityProvider,
+    private readonly alerts: AlertSource,
     private readonly knowledge: KnowledgeProvider | null = null,
   ) {}
 
@@ -165,8 +170,9 @@ export class ProductionWatcher {
   ): Promise<ProductionAlert | null> {
     const now = opts.now ?? (() => new Date());
 
-    const monitorsCall = await ctx.tool('datadog.listMonitors', { service }, () =>
-      this.observability.listMonitors(service),
+    const backend = this.alerts.backend;
+    const monitorsCall = await ctx.tool('observability.listAlerts', { backend, service }, () =>
+      this.alerts.listAlerts(service),
     );
     const monitors = monitorsCall.value;
 
@@ -202,19 +208,24 @@ export class ProductionWatcher {
     };
 
     const logsCall = await ctx.tool(
-      'datadog.queryLogs',
-      { service, level: 'error', from: logWindow.from, to: logWindow.to },
-      () => this.observability.queryLogs(service, logWindow, { level: 'error', limit: opts.logLimit ?? 200 }),
+      'observability.readErrors',
+      { backend, service, from: logWindow.from, to: logWindow.to },
+      () => this.alerts.readErrors(service, logWindow, { limit: opts.logLimit ?? 200 }),
     );
-    const logs = logsCall.value;
-
-    const clusters = clusterErrors(logs);
+    const read = logsCall.value;
+    // Log lines are clustered here; a backend that already grouped and parsed its
+    // errors (Sentry) is taken as it is, with no text parsing at all.
+    const logs: LogEntry[] & { truncated?: boolean } = read.kind === 'logs' ? read.logs : Object.assign([], { truncated: read.truncated ?? undefined });
+    const clusters = read.kind === 'logs' ? clusterErrors(read.logs) : clustersFromGroups(read.groups);
+    const truncated = read.kind === 'logs' ? read.logs.truncated ?? null : read.truncated;
 
     if (clusters.length === 0) {
       // The most important non-escalation. A monitor in Alert with no errors under
       // it is a monitor that is wrong about production.
       return {
         service,
+        backend,
+        alertNoun: this.alerts.alertNoun,
         monitor: alerting,
         firedAt,
         logWindow,
@@ -225,9 +236,9 @@ export class ProductionWatcher {
         novelty: null,
         escalate: false,
         toolCallIds: { monitors: monitorsCall.toolCallId, logs: logsCall.toolCallId },
-        logsTruncated: logs.truncated ?? null,
+        logsTruncated: truncated,
         rationale:
-          `Monitor "${alerting.name}" is alerting but produced no error logs in the ` +
+          `${this.alerts.alertNoun} "${alerting.name}" is alerting but produced no errors in the ` +
           `surrounding ${Math.round((logWindow.to.getTime() - logWindow.from.getTime()) / 60_000)} minutes. ` +
           `This is more likely a monitor problem than a production one, and is not escalated.`,
       };
@@ -250,6 +261,8 @@ export class ProductionWatcher {
 
     return {
       service,
+      backend,
+      alertNoun: this.alerts.alertNoun,
       monitor: alerting,
       firedAt,
       logWindow,
@@ -260,12 +273,12 @@ export class ProductionWatcher {
       novelty: chosen.novelty,
       escalate: novel.length > 0,
       toolCallIds: { monitors: monitorsCall.toolCallId, logs: logsCall.toolCallId },
-      logsTruncated: logs.truncated ?? null,
+      logsTruncated: truncated,
       rationale: novel.length > 0
-        ? `Monitor "${alerting.name}" is alerting and ${primary.count}${logs.truncated ? '+' : ''} error(s) match no documented ` +
-          `failure mode${logs.truncated ? ' (the log read hit its limit, so counts are lower bounds)' : ''}. ` +
+        ? `${this.alerts.alertNoun} "${alerting.name}" is alerting and ${primary.count}${truncated ? '+' : ''} error(s) match no documented ` +
+          `failure mode${truncated ? ' (the error read hit its limit, so counts are lower bounds)' : ''}. ` +
           `Escalating: ${primary.sample.slice(0, 120)}${others}`
-        : `Monitor "${alerting.name}" is alerting, but ${failures.length > 1 ? `each of its ${failures.length} failures is` : 'this failure is'} documented. ${chosen.novelty.reason} ` +
+        : `${this.alerts.alertNoun} "${alerting.name}" is alerting, but ${failures.length > 1 ? `each of its ${failures.length} failures is` : 'this failure is'} documented. ${chosen.novelty.reason} ` +
           `Handle via its runbook rather than investigating from scratch.`,
     };
   }

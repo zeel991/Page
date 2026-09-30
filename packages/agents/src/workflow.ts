@@ -7,6 +7,7 @@ import type {
   MetricName,
   KnowledgeProvider,
   MessagingProvider,
+  AlertSource,
   ObservabilityProvider,
   PullRequest,
   SourceControlProvider,
@@ -126,7 +127,13 @@ export interface WorkflowPersistence {
 }
 
 export interface WorkflowDeps {
+  /** Metrics and logs. */
   observability: ObservabilityProvider;
+  /**
+   * Where incidents are noticed. Defaults to `observability` when it is itself an
+   * alert source (Datadog is); Sentry is one without being a metrics backend.
+   */
+  alerts?: AlertSource;
   sourceControl: SourceControlProvider;
   messaging: MessagingProvider;
   issueTracker: IssueTrackerProvider | null;
@@ -483,8 +490,8 @@ export class IncidentWorkflow {
       return result;
     };
 
-    // ── 1. Datadog is watching ───────────────────────────────────────────────
-    const watcher = new ProductionWatcher(this.deps.observability, this.deps.knowledge);
+    // ── 1. Production is being watched ───────────────────────────────────────────────
+    const watcher = new ProductionWatcher(this.alertSource(), this.deps.knowledge);
     const preIncidentRuns: string[] = [];
     const alert = await this.deps.tracer.run('ProductionWatcher', { input: { service: input.service } }, (ctx) => {
       // Detection happens before an incident exists, so this run is linked to it
@@ -1246,7 +1253,7 @@ export class IncidentWorkflow {
     await advance('DEPLOYING_FIX', `Merged fix shipping for ${input.service}.`);
     await advance('VERIFYING_RECOVERY', 'Watching telemetry for a return to baseline.');
 
-    // ── 7. Watch Datadog again ───────────────────────────────────────────────
+    // ── 7. Watch production again ───────────────────────────────────────────────
     // A window that starts before the merge measures the incident, not the fix.
     // That used to happen whenever a merge landed later than the window fixed at
     // PR-open time, so the window is checked against GitHub's own merge time.
@@ -1260,7 +1267,7 @@ export class IncidentWorkflow {
             ? `The post-fix window starts at ${window.from.toISOString()}, before #${pr.number} merged at ` +
               `${pr.mergedAt.toISOString()}; it would measure traffic from before the fix.`
             : null;
-    const verifier = new RecoveryVerifier(this.deps.observability);
+    const verifier = new RecoveryVerifier(this.deps.observability, this.alertSource());
     const recovery =
       unmeasurable !== null || 'unavailable' in window
         ? unmeasuredRecovery(`Recovery could not be measured: ${unmeasurable}`)
@@ -1453,7 +1460,7 @@ export class IncidentWorkflow {
         for (const window of windows) {
           try {
             const call = await ctx.tool(
-              'datadog.queryMetric',
+              'observability.queryMetric',
               { service: alert.service, metric, window: window.kind },
               () => this.deps.observability.queryMetric(alert.service, metric, window),
             );
@@ -1498,9 +1505,10 @@ export class IncidentWorkflow {
     await persistence.evidence.record({
       organizationId: persistence.organizationId,
       incidentId,
-      kind: 'DATADOG_MONITOR',
+      kind: 'OBS_ALERT',
+      backend: alert.backend,
       provenance: 'OBSERVED',
-      summary: `Monitor "${alert.monitor.name}" is in ALERT since ${alert.firedAt.toISOString()}.`,
+      summary: `${alert.alertNoun} "${alert.monitor.name}" is in ALERT since ${alert.firedAt.toISOString()}.`,
       sourceToolCallId: alert.toolCallIds.monitors,
       sourceRef: `monitor:${alert.monitor.id}`,
       payload: { query: alert.monitor.query, status: alert.monitor.status },
@@ -1513,7 +1521,8 @@ export class IncidentWorkflow {
     await persistence.evidence.record({
       organizationId: persistence.organizationId,
       incidentId,
-      kind: frame ? 'STACK_TRACE' : 'DATADOG_LOG',
+      kind: frame ? 'STACK_TRACE' : 'OBS_LOG',
+      backend: alert.backend,
       provenance: 'OBSERVED',
       summary:
         `${cluster.errorType ?? 'Error'} occurred ${cluster.count} times between ` +
@@ -1604,6 +1613,14 @@ export class IncidentWorkflow {
    * autonomy its actions require is a misconfiguration, and quietly skipping the
    * pull request would leave an incident that looks handled and is not.
    */
+  /** The configured alert source, or the metrics backend when it is one. */
+  private alertSource(): AlertSource {
+    if (this.deps.alerts) return this.deps.alerts;
+    const obs = this.deps.observability as Partial<AlertSource> & ObservabilityProvider;
+    if (typeof obs.listAlerts === 'function' && typeof obs.readErrors === 'function') return obs as unknown as AlertSource;
+    throw new Error(`No alert source: ${obs.backend ?? 'the observability provider'} cannot list alerts, and none was configured.`);
+  }
+
   private assertAllowed(tool: ToolDefinition): void {
     assertToolAllowed(tool, { autonomy: this.deps.autonomy ?? DEFAULT_AUTONOMY_LEVEL });
   }
@@ -1889,7 +1906,7 @@ export class IncidentWorkflow {
     const c = alert.primary!;
     const frame = c.topApplicationFrame;
     return [
-      `${incidentKey} — detected by Pager Developer from Datadog monitor "${alert.monitor.name}".`,
+      `${incidentKey} — detected by Pager Developer from ${alert.alertNoun} "${alert.monitor.name}".`,
       '',
       '## Observed',
       `Error: ${c.sample}`,
@@ -2019,7 +2036,7 @@ export class IncidentWorkflow {
           `\n\n</details>`
         : `## Diagnosis\nNo model investigation was available for this incident.`,
 
-      `## Evidence — observed\n- Datadog monitor "${args.alert.monitor.name}" alerting\n` +
+      `## Evidence — observed\n- ${args.alert.alertNoun} "${args.alert.monitor.name}" alerting\n` +
         `- ${c.count} matching error logs\n` +
         `- Stack trace locates the failure at ${frame ? `\`${toRepositoryPath(frame.file)}:${frame.line}\`` : 'no application frame'}`,
 
@@ -2065,7 +2082,7 @@ export class IncidentWorkflow {
       `## What broke`,
       `${c.errorType ?? 'An error'} occurred ${c.count} times on ${c.affectedRoutes.join(', ') || 'production'}, ` +
         `first seen ${c.firstSeen.toISOString()} and last seen ${c.lastSeen.toISOString()}. ` +
-        `Datadog monitor "${alert.monitor.name}" alerted at ${alert.firedAt.toISOString()}.`,
+        `${alert.alertNoun} "${alert.monitor.name}" alerted at ${alert.firedAt.toISOString()}.`,
       `## Root cause`,
       rootCause,
       `## How it was found`,

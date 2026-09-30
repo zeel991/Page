@@ -144,6 +144,21 @@ export class JobQueue {
       .where(and(eq(jobs.id, jobId), eq(jobs.lockedBy, this.opts.workerId)));
   }
 
+  /**
+   * Bring a queued job forward to now — a pushed alert waking the service's poll.
+   * Only a job that is waiting; one that is running is left alone. Returns whether
+   * one was found.
+   */
+  async expedite(dedupeKey: string): Promise<boolean> {
+    const now = this.now();
+    const rows = await this.db
+      .update(jobs)
+      .set({ runAt: now, updatedAt: now })
+      .where(and(eq(jobs.dedupeKey, dedupeKey), eq(jobs.status, 'queued')))
+      .returning();
+    return rows.length > 0;
+  }
+
   /** Record a failure; retry with backoff until the job's attempts run out. */
   async fail(jobId: string, error: string): Promise<'retrying' | 'failed'> {
     const [job] = await this.db.select().from(jobs).where(eq(jobs.id, jobId)).limit(1);

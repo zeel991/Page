@@ -1,4 +1,4 @@
-import type { LogEntry } from '@pager/providers';
+import type { LogEntry, ObservedErrorGroup } from '@pager/providers';
 
 /**
  * Deterministic log analysis.
@@ -255,6 +255,39 @@ export function clusterErrors(logs: readonly LogEntry[]): ErrorCluster[] {
   }
 
   return [...clusters.values()].sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Clusters from error groups a backend already structured (Sentry's issues).
+ *
+ * The frames arrive typed, with the backend's own in-app judgement, so nothing is
+ * parsed out of text: the cluster is the group, reshaped.
+ */
+export function clustersFromGroups(groups: readonly ObservedErrorGroup[]): ErrorCluster[] {
+  return groups
+    .map((g) => {
+      const frames: StackFrame[] = g.frames.map((f) => ({
+        functionName: f.functionName,
+        file: f.file,
+        line: f.line,
+        column: f.column,
+        isDependency: !f.inApp,
+      }));
+      const application = frames.filter((f) => !f.isDependency);
+      return {
+        signature: errorSignature(g.message),
+        sample: g.message,
+        errorType: g.errorType,
+        count: g.count,
+        firstSeen: g.firstSeen,
+        lastSeen: g.lastSeen,
+        frames,
+        topApplicationFrame: application[0] ?? null,
+        entirelyInDependencies: frames.length > 0 && application.length === 0,
+        affectedRoutes: g.routes,
+      };
+    })
+    .sort((a, b) => b.count - a.count);
 }
 
 /**

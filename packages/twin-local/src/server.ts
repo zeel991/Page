@@ -7,6 +7,7 @@ import { findRepo, githubRoutes } from './github-routes.js';
 import { GIT_PATH, TwinGitServer } from './git-http.js';
 import { matchRoute, type Route } from './router.js';
 import { slackRoutes } from './slack-routes.js';
+import { sentryRoutes } from './sentry-routes.js';
 import { jiraRoutes, linearRoutes, notionRoutes } from './tracker-routes.js';
 import { resendRoutes } from './email-routes.js';
 import { cloneState, emptyState, type TwinState } from './store.js';
@@ -38,6 +39,7 @@ export interface TwinEndpoints {
   linear: string;
   notion: string;
   resend: string;
+  sentry: string;
 }
 
 export class LocalTwinServer {
@@ -59,6 +61,7 @@ export class LocalTwinServer {
       { prefix: '/linear', routes: linearRoutes() },
       { prefix: '/notion', routes: notionRoutes() },
       { prefix: '/resend', routes: resendRoutes() },
+      { prefix: '/sentry', routes: sentryRoutes() },
     ];
   }
 
@@ -91,6 +94,7 @@ export class LocalTwinServer {
       linear: `${base}/linear`,
       notion: `${base}/notion`,
       resend: `${base}/resend`,
+      sentry: `${base}/sentry`,
     };
   }
 
