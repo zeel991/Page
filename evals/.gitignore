@@ -1,1 +1,3 @@
-reports/
+reports/*
+# Benchmark reports are the source of the published numbers; they are kept.
+!reports/benchmark-*.json

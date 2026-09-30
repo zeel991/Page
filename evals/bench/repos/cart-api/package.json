@@ -1,0 +1,10 @@
+{
+  "name": "cart-api",
+  "version": "2.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Benchmark base repository: a TypeScript cart service, tested with node:test.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

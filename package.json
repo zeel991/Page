@@ -29,7 +29,8 @@
     "eval:agent": "pnpm --filter @pager/evals eval:agent",
     "probe:datadog": "pnpm --filter @pager/evals probe:datadog",
     "db:migrate": "pnpm --filter @pager/db migrate",
-    "demo:e2e": "pnpm --filter @pager/evals e2e"
+    "demo:e2e": "pnpm --filter @pager/evals e2e",
+    "bench": "pnpm --filter @pager/evals bench"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

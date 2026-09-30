@@ -1,0 +1,1287 @@
+{
+  "generatedAt": "2026-09-30T07:47:37.042Z",
+  "mode": "scripted",
+  "model": null,
+  "repeat": 1,
+  "subset": null,
+  "scenarios": [
+    {
+      "id": "cart-wrong-default",
+      "kind": "bug",
+      "type": "wrong_default",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "line total for A must be positive, got 0"
+      },
+      "why": "\"Stop assuming a quantity of one\" ships a wrong default in src/pricing.ts."
+    },
+    {
+      "id": "cart-off-by-one",
+      "kind": "bug",
+      "type": "off_by_one",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'unitPriceCents')"
+      },
+      "why": "\"Iterate lines with an index\" ships a off by one in src/pricing.ts."
+    },
+    {
+      "id": "cart-null-discount",
+      "kind": "bug",
+      "type": "null_access",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'percentOff')"
+      },
+      "why": "\"Tidy discount calculation\" ships a null access in src/pricing.ts."
+    },
+    {
+      "id": "cart-missing-fallback",
+      "kind": "bug",
+      "type": "missing_fallback",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'percent')"
+      },
+      "why": "\"Look tax rates up strictly\" ships a missing fallback in src/pricing.ts."
+    },
+    {
+      "id": "cart-wrong-unit",
+      "kind": "bug",
+      "type": "wrong_unit",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "shipping fee 50299 exceeds the cap"
+      },
+      "why": "\"Charge shipping by weight band\" ships a wrong unit in src/pricing.ts."
+    },
+    {
+      "id": "cart-unhandled-enum",
+      "kind": "bug",
+      "type": "unhandled_enum",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "Error",
+        "message": "unhandled order status \"refunded\""
+      },
+      "why": "\"Simplify order status labels\" ships a unhandled enum in src/pricing.ts."
+    },
+    {
+      "id": "cart-divide-by-zero",
+      "kind": "bug",
+      "type": "division_by_zero",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "instalment amount is not a number: Infinity"
+      },
+      "why": "\"Honour the requested instalment count\" ships a division by zero in src/pricing.ts."
+    },
+    {
+      "id": "cart-missing-await",
+      "kind": "bug",
+      "type": "missing_await",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "converted price is not a number: NaN"
+      },
+      "why": "\"Type the exchange rate lookup\" ships a missing await in src/pricing.ts."
+    },
+    {
+      "id": "shop-missing-await",
+      "kind": "bug",
+      "type": "missing_await",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "reservation for A did not complete"
+      },
+      "why": "\"Reserve stock without blocking the request\" ships a missing await in src/fulfilment.js."
+    },
+    {
+      "id": "shop-wrong-operator",
+      "kind": "bug",
+      "type": "wrong_operator",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "refund 1100 exceeds what was paid"
+      },
+      "why": "\"Include fees in refund calculation\" ships a wrong operator in src/fulfilment.js."
+    },
+    {
+      "id": "shop-missing-fallback",
+      "kind": "bug",
+      "type": "missing_fallback",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'days')"
+      },
+      "why": "\"Look delivery zones up directly\" ships a missing fallback in src/fulfilment.js."
+    },
+    {
+      "id": "shop-wrong-default",
+      "kind": "bug",
+      "type": "wrong_default",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "box count is not a number: Infinity"
+      },
+      "why": "\"Make box size explicit\" ships a wrong default in src/fulfilment.js."
+    },
+    {
+      "id": "shop-wrong-unit",
+      "kind": "bug",
+      "type": "wrong_unit",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "parcel of 2000 kg is over the freight limit"
+      },
+      "why": "\"Report parcel weight directly\" ships a wrong unit in src/fulfilment.js."
+    },
+    {
+      "id": "shop-off-by-one",
+      "kind": "bug",
+      "type": "off_by_one",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'sku')"
+      },
+      "why": "\"Show the most recent pick\" ships a off by one in src/fulfilment.js."
+    },
+    {
+      "id": "shop-null-carrier",
+      "kind": "bug",
+      "type": "null_access",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'code')"
+      },
+      "why": "\"Build tracking links for every shipment\" ships a null access in src/fulfilment.js."
+    },
+    {
+      "id": "shop-unhandled-enum",
+      "kind": "bug",
+      "type": "unhandled_enum",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "Error",
+        "message": "unhandled fulfilment state \"partially_shipped\""
+      },
+      "why": "\"Collapse fulfilment states\" ships a unhandled enum in src/fulfilment.js."
+    },
+    {
+      "id": "inv-wrong-default",
+      "kind": "bug",
+      "type": "wrong_default",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "line total for A must be positive, got 0"
+      },
+      "why": "\"Stop defaulting line quantities\" ships a wrong default in billing/invoice.py."
+    },
+    {
+      "id": "inv-missing-fallback",
+      "kind": "bug",
+      "type": "missing_fallback",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "KeyError",
+        "message": "'ap-south'"
+      },
+      "why": "\"Look tax rates up strictly\" ships a missing fallback in billing/invoice.py."
+    },
+    {
+      "id": "inv-zero-division",
+      "kind": "bug",
+      "type": "division_by_zero",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "ZeroDivisionError",
+        "message": "division by zero"
+      },
+      "why": "\"Simplify proration\" ships a division by zero in billing/invoice.py."
+    },
+    {
+      "id": "inv-unhandled-enum",
+      "kind": "bug",
+      "type": "unhandled_enum",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "ValueError",
+        "message": "unknown payment terms 'due_on_receipt'"
+      },
+      "why": "\"Trim payment terms\" ships a unhandled enum in billing/invoice.py."
+    },
+    {
+      "id": "inv-wrong-unit",
+      "kind": "bug",
+      "type": "wrong_unit",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "late fee 4815 exceeds the balance 3210"
+      },
+      "why": "\"Express the late fee as a daily rate\" ships a wrong unit in billing/invoice.py."
+    },
+    {
+      "id": "inv-off-by-one",
+      "kind": "bug",
+      "type": "off_by_one",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "IndexError",
+        "message": "list index out of range"
+      },
+      "why": "\"Index payments explicitly\" ships a off by one in billing/invoice.py."
+    },
+    {
+      "id": "inv-none-access",
+      "kind": "bug",
+      "type": "null_access",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "AttributeError",
+        "message": "'NoneType' object has no attribute 'get'"
+      },
+      "why": "\"Read the customer record directly\" ships a null access in billing/invoice.py."
+    },
+    {
+      "id": "inv-wrong-operator",
+      "kind": "bug",
+      "type": "wrong_operator",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": true,
+      "failure": {
+        "errorType": "InvariantError",
+        "message": "credit increased the balance to 3510"
+      },
+      "why": "\"Apply credit notes\" ships a wrong operator in billing/invoice.py."
+    },
+    {
+      "id": "ctl-predates-cart",
+      "kind": "control",
+      "type": "error_predates_deploy",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'percent')"
+      },
+      "why": "The same TypeError was already happening an hour before the deploy, which changed only the README. The deploy did not cause it."
+    },
+    {
+      "id": "ctl-predates-shop",
+      "kind": "control",
+      "type": "error_predates_deploy",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'code')"
+      },
+      "why": "Tracking links have been failing since before the deploy, which changed only the README."
+    },
+    {
+      "id": "ctl-predates-invoice",
+      "kind": "control",
+      "type": "error_predates_deploy",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "KeyError",
+        "message": "'ap-south'"
+      },
+      "why": "The KeyError predates the deploy, which changed only the README."
+    },
+    {
+      "id": "ctl-stale-cart",
+      "kind": "control",
+      "type": "stale_telemetry",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'percentOff')"
+      },
+      "why": "The errors stopped four hours ago and the monitor never cleared. Nothing is failing now."
+    },
+    {
+      "id": "ctl-stale-invoice",
+      "kind": "control",
+      "type": "stale_telemetry",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "ZeroDivisionError",
+        "message": "division by zero"
+      },
+      "why": "The errors are four hours old; the evidence window does not reach them."
+    },
+    {
+      "id": "ctl-downstream-cart",
+      "kind": "control",
+      "type": "downstream_503",
+      "repository": "acme/cart-api",
+      "language": "typescript",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "UpstreamError",
+        "message": "UpstreamError: payments service responded 503 Service Unavailable"
+      },
+      "why": "The payments service is answering 503. Every frame is inside its client library; the deploy changed only the README."
+    },
+    {
+      "id": "ctl-downstream-invoice",
+      "kind": "control",
+      "type": "downstream_503",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "HTTPError",
+        "message": "ledger sync failed"
+      },
+      "why": "The ledger service is answering 503 inside the HTTP client; the deploy changed only the README."
+    },
+    {
+      "id": "ctl-flaky-shop",
+      "kind": "control",
+      "type": "flaky_test",
+      "repository": "acme/shop-api",
+      "language": "javascript",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "TimeoutError",
+        "message": "TimeoutError: inventory lookup timed out after 2000ms"
+      },
+      "why": "An intermittent timeout from the stock service. Nothing in the code is wrong; a test written for it passes or fails depending on timing."
+    },
+    {
+      "id": "ctl-flaky-invoice",
+      "kind": "control",
+      "type": "flaky_test",
+      "repository": "acme/invoice-api",
+      "language": "python",
+      "expectPullRequest": false,
+      "failure": {
+        "errorType": "TimeoutError",
+        "message": "invoice summary failed"
+      },
+      "why": "An intermittent ledger timeout. A test written for it passes on the second run whatever the code does."
+    }
+  ],
+  "trials": [
+    {
+      "scenario": "cart-wrong-default",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 830,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "cart-off-by-one",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 798,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "cart-null-discount",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 797,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "cart-missing-fallback",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 815,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "cart-wrong-unit",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 801,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "cart-unhandled-enum",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 814,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "cart-divide-by-zero",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 805,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "cart-missing-await",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 834,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "shop-missing-await",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 2539,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "shop-wrong-operator",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 2694,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "shop-missing-fallback",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 2556,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "shop-wrong-default",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 2552,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "shop-wrong-unit",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 2814,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "shop-off-by-one",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 2685,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "shop-null-carrier",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 2813,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "shop-unhandled-enum",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 2789,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "inv-wrong-default",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 1090,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "inv-missing-fallback",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 1063,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "inv-zero-division",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 1010,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "inv-unhandled-enum",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 1016,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "inv-wrong-unit",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 1086,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "inv-off-by-one",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 1045,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "inv-none-access",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": true,
+      "suitePassed": true,
+      "fixed": true,
+      "correct": true,
+      "durationMs": 1045,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "inv-wrong-operator",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": null,
+      "reproduced": false,
+      "stage": "halted",
+      "haltReason": "Patch rejected: The regression test still fails after the patch, so the patch does not fix the bug.",
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": false,
+      "durationMs": 1086,
+      "toolCalls": 10,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-predates-cart",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": false,
+      "durationMs": 860,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-predates-shop",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": false,
+      "durationMs": 3092,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-predates-invoice",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": false,
+      "durationMs": 1213,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-stale-cart",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": null,
+      "reproduced": false,
+      "stage": "not_escalated",
+      "haltReason": null,
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": true,
+      "durationMs": 17,
+      "toolCalls": 2,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-stale-invoice",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": null,
+      "reproduced": false,
+      "stage": "not_escalated",
+      "haltReason": null,
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": true,
+      "durationMs": 29,
+      "toolCalls": 2,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-downstream-cart",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": null,
+      "reproduced": false,
+      "stage": "halted",
+      "haltReason": "Reproduction failed: The regression test passed against the unpatched code, so it does not exercise the reported failure. This is not a reproduction.",
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": true,
+      "durationMs": 593,
+      "toolCalls": 10,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-downstream-invoice",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": null,
+      "reproduced": false,
+      "stage": "halted",
+      "haltReason": "Reproduction failed: The regression test passed against the unpatched code, so it does not exercise the reported failure. This is not a reproduction.",
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": true,
+      "durationMs": 829,
+      "toolCalls": 10,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-flaky-shop",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": false,
+      "durationMs": 3153,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    },
+    {
+      "scenario": "ctl-flaky-invoice",
+      "trial": 1,
+      "mode": "scripted",
+      "pullRequest": 1,
+      "reproduced": true,
+      "stage": "awaiting_merge",
+      "haltReason": null,
+      "oraclePassed": null,
+      "suitePassed": null,
+      "fixed": false,
+      "correct": false,
+      "durationMs": 1276,
+      "toolCalls": 13,
+      "modelCalls": 0,
+      "costUsd": null,
+      "error": null
+    }
+  ],
+  "metrics": {
+    "fixRate": {
+      "successes": 23,
+      "trials": 24,
+      "rate": 0.9583333333333334,
+      "ci95": [
+        0.7975819334115467,
+        0.9926065439164028
+      ]
+    },
+    "falsePullRequests": {
+      "successes": 5,
+      "trials": 28,
+      "rate": 0.17857142857142858,
+      "ci95": [
+        0.07878501895759982,
+        0.3559142494677742
+      ],
+      "onControls": 5,
+      "failingOracle": 0
+    },
+    "abstentionPrecision": {
+      "successes": 4,
+      "trials": 5,
+      "rate": 0.8,
+      "ci95": [
+        0.375534627029995,
+        0.9637758917743693
+      ]
+    },
+    "abstentionRecall": {
+      "successes": 4,
+      "trials": 9,
+      "rate": 0.4444444444444444,
+      "ci95": [
+        0.18877851977054566,
+        0.7333487081991259
+      ]
+    },
+    "reproductionRate": {
+      "successes": 23,
+      "trials": 24,
+      "rate": 0.9583333333333334,
+      "ci95": [
+        0.7975819334115467,
+        0.9926065439164028
+      ]
+    },
+    "timeToPrSeconds": {
+      "median": 1.1,
+      "p90": 2.8
+    },
+    "costPerIncidentUsd": {
+      "median": null,
+      "note": "scripted authorship: no model calls, so no model cost"
+    },
+    "toolCallsPerIncident": {
+      "median": 13,
+      "mean": 12.06060606060606
+    },
+    "passAtK": {
+      "successes": 23,
+      "trials": 24,
+      "rate": 0.9583333333333334,
+      "ci95": [
+        0.7975819334115467,
+        0.9926065439164028
+      ],
+      "k": 1
+    },
+    "variance": {
+      "meanVariance": 0,
+      "inconsistentScenarios": 0,
+      "scenarios": 33
+    },
+    "errors": 0
+  },
+  "byType": [
+    {
+      "kind": "bug",
+      "type": "wrong_default",
+      "correct": {
+        "successes": 3,
+        "trials": 3,
+        "rate": 1,
+        "ci95": [
+          0.43850296436068037,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "bug",
+      "type": "off_by_one",
+      "correct": {
+        "successes": 3,
+        "trials": 3,
+        "rate": 1,
+        "ci95": [
+          0.43850296436068037,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "bug",
+      "type": "null_access",
+      "correct": {
+        "successes": 3,
+        "trials": 3,
+        "rate": 1,
+        "ci95": [
+          0.43850296436068037,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "bug",
+      "type": "missing_fallback",
+      "correct": {
+        "successes": 3,
+        "trials": 3,
+        "rate": 1,
+        "ci95": [
+          0.43850296436068037,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "bug",
+      "type": "wrong_unit",
+      "correct": {
+        "successes": 3,
+        "trials": 3,
+        "rate": 1,
+        "ci95": [
+          0.43850296436068037,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "bug",
+      "type": "unhandled_enum",
+      "correct": {
+        "successes": 3,
+        "trials": 3,
+        "rate": 1,
+        "ci95": [
+          0.43850296436068037,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "bug",
+      "type": "division_by_zero",
+      "correct": {
+        "successes": 2,
+        "trials": 2,
+        "rate": 1,
+        "ci95": [
+          0.3423802239546494,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "bug",
+      "type": "missing_await",
+      "correct": {
+        "successes": 2,
+        "trials": 2,
+        "rate": 1,
+        "ci95": [
+          0.3423802239546494,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "bug",
+      "type": "wrong_operator",
+      "correct": {
+        "successes": 1,
+        "trials": 2,
+        "rate": 0.5,
+        "ci95": [
+          0.09453120463920084,
+          0.9054687953607992
+        ]
+      }
+    },
+    {
+      "kind": "control",
+      "type": "error_predates_deploy",
+      "correct": {
+        "successes": 0,
+        "trials": 3,
+        "rate": 0,
+        "ci95": [
+          0,
+          0.5614970356393196
+        ]
+      }
+    },
+    {
+      "kind": "control",
+      "type": "stale_telemetry",
+      "correct": {
+        "successes": 2,
+        "trials": 2,
+        "rate": 1,
+        "ci95": [
+          0.3423802239546494,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "control",
+      "type": "downstream_503",
+      "correct": {
+        "successes": 2,
+        "trials": 2,
+        "rate": 1,
+        "ci95": [
+          0.3423802239546494,
+          1
+        ]
+      }
+    },
+    {
+      "kind": "control",
+      "type": "flaky_test",
+      "correct": {
+        "successes": 0,
+        "trials": 2,
+        "rate": 0,
+        "ci95": [
+          0,
+          0.6576197760453506
+        ]
+      }
+    }
+  ],
+  "caveats": [
+    "Scripted authorship: every regression test and patch came from the recipe, as an eager author would write them. These numbers measure detection and the deterministic gates, not a model. A live run (--live) measures the model; none is reported here.",
+    "Local twins throughout (GitHub, Datadog, Slack, Notion); the repositories are small benchmark services under evals/bench/repos.",
+    "Telemetry is synthetic but its failures are real: each is what the buggy code actually threw when run with the recipe’s trigger."
+  ]
+}
