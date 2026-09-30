@@ -80,6 +80,9 @@ services:
         value: 0.0.0.0
       - key: LOG_LEVEL
         value: info
+      # Render's proxy sets X-Forwarded-For; webhooks are rate-limited by sender.
+      - key: PAGER_TRUST_PROXY
+        value: "1"
       # The console's public URL: the only origin allowed to call the API from a
       # browser, and where GitHub and Slack send people back after installing.
       - key: PAGER_WEB_ORIGIN

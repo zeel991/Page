@@ -32,6 +32,8 @@ async function main(): Promise<void> {
           }
         : null,
     ...(process.env.LOG_LEVEL ? { logLevel: process.env.LOG_LEVEL } : {}),
+    // Render (and most hosts) terminate TLS in a proxy that sets X-Forwarded-For.
+    trustProxy: process.env.PAGER_TRUST_PROXY === '1',
   });
 
   const shutdown = async (): Promise<void> => {

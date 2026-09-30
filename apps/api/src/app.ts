@@ -10,6 +10,7 @@ import { registerSentryWebhook } from './sentry-webhook.ts';
 import { internalGuard, sessionGuard } from './auth.ts';
 import { registerInternalRoutes } from './internal-routes.ts';
 import { registerConsoleRoutes } from './routes.ts';
+import { RateLimiter, rateLimitHook, type RateLimitOptions } from './rate-limit.ts';
 
 export interface AppDeps {
   db: Database;
@@ -26,13 +27,25 @@ export interface AppDeps {
   /** Relaxations for tests against local twins. Production leaves this unset. */
   configPolicy?: ConfigPolicy;
   logLevel?: string;
+  /**
+   * Requests per minute: per signed-in person on console routes, per sender address
+   * on webhooks. Defaults 600 and 600.
+   */
+  rateLimits?: { console?: RateLimitOptions; webhooks?: RateLimitOptions };
+  /**
+   * Behind a load balancer (Render), the sender's address is in X-Forwarded-For.
+   * Only set it when a proxy is in front: otherwise a caller could claim any address.
+   */
+  trustProxy?: boolean;
 }
 
 /**
  * The API, assembled. Separate from `main.ts` so tests can drive it with `inject`.
  */
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
-  const app = Fastify({ logger: { level: deps.logLevel ?? 'warn' } });
+  const app = Fastify({ logger: { level: deps.logLevel ?? 'warn' }, trustProxy: deps.trustProxy ?? false });
+  const consoleLimiter = new RateLimiter(deps.rateLimits?.console ?? { limit: 600, windowMs: 60_000 });
+  const webhookLimiter = new RateLimiter(deps.rateLimits?.webhooks ?? { limit: 600, windowMs: 60_000 });
   // Browsers never need the API directly — the console calls it from its server —
   // but if one does, it is only from the console's own origin.
   await app.register(cors, { origin: [deps.webOrigin], credentials: false });
@@ -44,6 +57,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   await app.register(async (scoped) => {
     scoped.addHook('preHandler', session);
+    // After the session guard, so the key is the person it established.
+    scoped.addHook('preHandler', rateLimitHook(consoleLimiter, (r) => (r.auth ? `user:${r.auth.userId}` : null)));
     await registerConsoleRoutes(scoped, { db: deps.db });
     await registerCredentialRoutes(scoped, { vault: deps.vault, log: (line) => app.log.info(line) });
     await registerGitHubRoutes(scoped, { db: deps.db, sessionSecret: deps.sessionSecret, github: deps.github ?? null });
@@ -64,6 +79,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
   // Callers that are not the console: authenticated by their own signatures.
   await app.register(async (scoped) => {
+    // Before the signature is checked, so a flood is turned away cheaply.
+    scoped.addHook('onRequest', rateLimitHook(webhookLimiter, (r) => `ip:${r.ip}`));
     await registerGitHubWebhook(scoped, { db: deps.db, github: deps.github ?? null });
     await registerSentryWebhook(scoped, { db: deps.db, vault: deps.vault });
   });

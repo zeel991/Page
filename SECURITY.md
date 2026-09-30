@@ -136,4 +136,5 @@ link-local and mapped address ranges refused.
 - `DockerRunner`'s arguments are unit-tested. It has not been run against a daemon in
   this repository's CI.
 - There is no KMS integration yet; the master key is an environment variable.
-- There is no per-client rate limiting on the API's routes.
+- Rate limits are per API instance and in memory: console routes 600 a minute per
+  signed-in person, webhooks 600 a minute per sender address.
