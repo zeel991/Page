@@ -17,7 +17,7 @@
     "db:push": "pnpm --filter @pager/db push",
     "db:seed": "pnpm --filter @pager/db seed",
     "dev": "pnpm --parallel --filter './apps/**' dev",
-    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "verify": "pnpm -r --filter './packages/**' build && pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "preflight": "pnpm --filter @pager/evals preflight",
     "demo:phase1": "pnpm --filter @pager/evals phase1",
     "demo:local": "pnpm --filter @pager/evals local",

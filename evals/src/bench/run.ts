@@ -5,6 +5,7 @@
  *   pnpm bench --live --repeat 3       the same with the live model (costs money; run by hand)
  *   pnpm bench --subset ci             the deterministic subset CI runs
  *   pnpm bench --check                 validate the recipes themselves, without running the agent
+ *   pnpm bench --subset ci --gate      exit non-zero if any trial has the wrong outcome (what CI runs)
  *   pnpm bench --only cart-off-by-one  one scenario
  *
  * Every scenario type repeats, abstentions included. A pull request is judged by a
@@ -123,13 +124,22 @@ async function main(): Promise<void> {
   const report = buildReport(scenarios, trials, { mode, repeat, model: mode === 'live' ? availability.model : null, subset: only });
   const date = new Date().toISOString().slice(0, 10);
   await mkdir(REPORTS, { recursive: true });
-  const jsonPath = join(REPORTS, `benchmark-${date}.json`);
+  // A partial run gets its own file, so it never replaces the full run's report.
+  const suffix = only ? (value('subset') ? `-subset-${value('subset')}` : '-partial') : '';
+  const jsonPath = join(REPORTS, `benchmark-${date}${suffix}.json`);
   await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`);
   if (!only) {
     await mkdir(DOCS, { recursive: true });
     await writeFile(join(DOCS, 'benchmark.md'), renderMarkdown(report, `evals/reports/benchmark-${date}.json`, await earlierRuns()));
   }
   console.log(`\n${renderHeadline(report)}\nWrote ${jsonPath}${only ? '' : ' and docs/benchmark.md'}`);
+  if (flag('gate')) {
+    const wrong = trials.filter((t) => !t.correct);
+    if (wrong.length > 0) {
+      console.error(`\n${wrong.length} trial(s) had the wrong outcome: ${[...new Set(wrong.map((t) => t.scenario))].join(', ')}`);
+      process.exitCode = 1;
+    }
+  }
 }
 
 async function runTrial(scenario: BenchScenario, trial: number, mode: Mode, cache: DirectoryDependencyCache): Promise<Trial> {
