@@ -1,6 +1,6 @@
 import { LocalKeyWrapper } from '@pager/core';
 import { CredentialVault } from '@pager/db';
-import { SlackAppClient, githubAppFromEnv } from '@pager/providers';
+import { SlackAppClient, githubAppFromEnv, dodoFromEnv } from '@pager/providers';
 import { buildApp } from './app.ts';
 import { openDatabase } from './db.ts';
 
@@ -32,6 +32,9 @@ async function main(): Promise<void> {
           }
         : null,
     ...(process.env.LOG_LEVEL ? { logLevel: process.env.LOG_LEVEL } : {}),
+    // Render (and most hosts) terminate TLS in a proxy that sets X-Forwarded-For.
+    trustProxy: process.env.PAGER_TRUST_PROXY === '1',
+    billing: dodoFromEnv(process.env),
   });
 
   const shutdown = async (): Promise<void> => {

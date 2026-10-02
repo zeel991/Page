@@ -7,6 +7,8 @@ import {
   errorType,
   firstSentences,
   parseStackTrace,
+  locateInRepository,
+  repositoryPathOf,
   toRepositoryPath,
 } from '../src/log-analysis.js';
 
@@ -28,6 +30,43 @@ const log = (over: Partial<LogEntry> = {}): LogEntry => ({
   stackTrace: APP_TRACE,
   attributes: { 'http.route': 'POST /checkout' },
   ...over,
+});
+
+
+/** The demo repository's files, as a listing would report them. */
+const REPO = new Set(['src/checkout/service.ts', 'src/server.ts', 'src/a.ts', 'handler.js']);
+const inRepo = (file: string) => repositoryPathOf(file, REPO);
+
+describe('locateInRepository', () => {
+  const cluster = () =>
+    clusterErrors([
+      {
+        at: new Date('2026-09-14T00:20:00Z'),
+        service: 'checkout-api',
+        level: 'error',
+        message: 'TypeError: boom',
+        stackTrace:
+          'TypeError: boom\n' +
+          '    at bundled (/app/dist/vendor.js:1:1)\n' +
+          '    at CheckoutService.createOrder (/app/src/checkout/service.ts:22:60)',
+        attributes: {},
+      },
+    ])[0]!;
+
+  it('rewrites frames to repository paths, and a frame outside the repository is not application code', () => {
+    const located = locateInRepository(cluster(), { paths: [...REPO], truncated: false });
+    expect(located.frames.map((f) => [f.file, f.isDependency])).toEqual([
+      ['/app/dist/vendor.js', true],
+      ['src/checkout/service.ts', false],
+    ]);
+    expect(located.topApplicationFrame).toMatchObject({ file: 'src/checkout/service.ts', line: 22 });
+  });
+
+  it('reclassifies nothing from a partial listing', () => {
+    const located = locateInRepository(cluster(), { paths: ['src/checkout/service.ts'], truncated: true });
+    expect(located.frames[0]!.isDependency).toBe(false);
+    expect(located.frames[1]!.file).toBe('src/checkout/service.ts');
+  });
 });
 
 describe('stack trace parsing', () => {
@@ -55,9 +94,9 @@ describe('stack trace parsing', () => {
     expect(parseStackTrace('TypeError: boom\n  some prose\n')).toHaveLength(0);
   });
 
-  it('strips a container prefix to a repository-relative path', () => {
-    expect(toRepositoryPath('/app/src/checkout/service.ts')).toBe('src/checkout/service.ts');
-    expect(toRepositoryPath('/var/task/src/a.ts')).toBe('src/a.ts');
+  it('maps a runtime path to the repository file it names', () => {
+    expect(inRepo('/app/src/checkout/service.ts')).toBe('src/checkout/service.ts');
+    expect(inRepo('/var/task/src/a.ts')).toBe('src/a.ts');
   });
 });
 
@@ -139,7 +178,7 @@ describe('clustering', () => {
 
 describe('novelty', () => {
   const known = [
-    { marker: 'PaymentGatewayError', description: 'Upstream gateway 503s', source: 'Runbook: checkout-api' },
+    { errorType: 'PaymentGatewayError', locations: ['@acme/payments-sdk'], messages: ['503'], description: 'Upstream gateway 503s', source: 'Runbook: checkout-api' },
   ];
 
   it('treats a documented failure mode as anticipated', () => {
@@ -157,12 +196,20 @@ describe('novelty', () => {
     expect(verdict.matched).toBeNull();
   });
 
-  it('ignores markers too short to be distinctive', () => {
-    // A vague runbook must not be able to suppress a novel failure.
+  it('does not treat a runbook that merely mentions the error type as documenting this failure', () => {
+    // The old check matched any runbook line containing the type: a runbook note about
+    // one TypeError silenced every TypeError the service would ever throw.
     const verdict = assessNovelty(clusterErrors([log()])[0]!, [
-      { marker: 'e', description: 'anything', source: 'bad runbook' },
+      { errorType: 'TypeError', locations: [], messages: [], description: 'TypeError in the legacy importer', source: 'Runbook' },
+      { errorType: 'TypeError', locations: ['src/importer/legacy.ts'], messages: ['reading \'rows\''], description: 'x', source: 'Runbook' },
     ]);
     expect(verdict.novel).toBe(true);
+    expect(verdict.reason).toMatch(/without a location or message specific enough/);
+  });
+
+  it('requires the same error type, not a substring of one', () => {
+    const cluster = clusterErrors([log({ message: 'PaymentGatewayErrorV2: upstream returned 503', stackTrace: VENDOR_TRACE })])[0]!;
+    expect(assessNovelty(cluster, known).novel).toBe(true);
   });
 
   it('reports novel when there are no documented modes at all', () => {
@@ -177,22 +224,31 @@ describe('novelty', () => {
  * produced a path that matched no file in the repository — which reads downstream
  * as "the file is not there" rather than "the frame was not understood".
  */
-describe('toRepositoryPath on real runtimes', () => {
+describe('repository paths on real runtimes', () => {
+  it('removes only the scheme and the leading slash when the repository is not known', () => {
+    expect(toRepositoryPath('file:///app/src/a.ts')).toBe('app/src/a.ts');
+  });
+
   it('handles a Render container root behind a file:// URL', () => {
     expect(
-      toRepositoryPath('file:///opt/render/project/src/src/checkout/service.ts'),
+      inRepo('file:///opt/render/project/src/src/checkout/service.ts'),
     ).toBe('src/checkout/service.ts');
   });
 
   it('handles a Render container root without a scheme', () => {
-    expect(toRepositoryPath('/opt/render/project/src/src/checkout/service.ts')).toBe(
+    expect(inRepo('/opt/render/project/src/src/checkout/service.ts')).toBe(
       'src/checkout/service.ts',
     );
   });
 
-  it('still handles the container roots it already knew', () => {
-    expect(toRepositoryPath('/app/src/checkout/service.ts')).toBe('src/checkout/service.ts');
-    expect(toRepositoryPath('/var/task/handler.js')).toBe('handler.js');
+  it('derives the working directory from the repository, not from a list of platforms', () => {
+    expect(inRepo('/app/src/checkout/service.ts')).toBe('src/checkout/service.ts');
+    expect(inRepo('/var/task/handler.js')).toBe('handler.js');
+    // A root no list would know.
+    expect(inRepo('/mnt/builds/7f3a/checkout-api/src/checkout/service.ts')).toBe('src/checkout/service.ts');
+    // The longest suffix wins, so a repository with its own src/src is not misread.
+    expect(repositoryPathOf('/app/src/src/x.ts', new Set(['src/x.ts', 'src/src/x.ts']))).toBe('src/src/x.ts');
+    expect(inRepo('/usr/lib/node/internal/timers.js')).toBeNull();
   });
 
   it('parses a real Render stack frame end to end', () => {
@@ -203,7 +259,7 @@ describe('toRepositoryPath on real runtimes', () => {
     );
     expect(frames).toHaveLength(2);
     expect(frames[0]!.isDependency).toBe(false);
-    expect(toRepositoryPath(frames[0]!.file)).toBe('src/checkout/service.ts');
+    expect(inRepo(frames[0]!.file)).toBe('src/checkout/service.ts');
     expect(frames[0]!.line).toBe(22);
   });
 });
@@ -243,7 +299,7 @@ describe('clustering real structured logs', () => {
 
   it('locates the failure in a repository file', () => {
     const frame = clusterErrors([entry()])[0]!.topApplicationFrame!;
-    expect(toRepositoryPath(frame.file)).toBe('src/checkout/service.ts');
+    expect(inRepo(frame.file)).toBe('src/checkout/service.ts');
     expect(frame.line).toBe(22);
   });
 });
@@ -290,7 +346,7 @@ describe('clustering ignores entries that describe no failure', () => {
     expect(clusters).toHaveLength(1);
     expect(clusters[0]!.errorType).toBe('TypeError');
     expect(clusters[0]!.count).toBe(3);
-    expect(toRepositoryPath(clusters[0]!.topApplicationFrame!.file)).toBe('src/checkout/service.ts');
+    expect(inRepo(clusters[0]!.topApplicationFrame!.file)).toBe('src/checkout/service.ts');
   });
 
   it('still keeps an error that has a message but no stack', () => {

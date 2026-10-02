@@ -1,339 +1,254 @@
 # Pager Developer — Architecture
 
-> Status: living document. Written at the start of Phase 1 and updated at each phase
-> boundary. Every claim about an external API here was verified against that vendor's
-> documentation on 2026-09-13; re-verify before relying on it.
+> Status: living document, describing the code as it is. Last brought into line with
+> the code on 2026-09-30. §12 keeps the original plan from 2026-09-13 for the record;
+> where the plan and the code disagree, the code wins and this document should be
+> corrected.
 
 ## 1. What this is
 
-Pager Developer is an AI production engineer assigned to software deployments. It
-observes deployments, detects regressions, investigates them, decides whether the
-deployment is to blame, reproduces the failure, writes and verifies a fix, and brings
-a human a reviewable PR with the evidence attached.
-
-The product promise is not "production is broken". It is:
+Pager Developer is an AI production engineer. It watches a service in production,
+notices when a deployment breaks it, works out why, reproduces the failure, writes and
+proves a fix, and gives a person a reviewable pull request with the evidence
+attached. A person merges it.
 
 > Production broke. I investigated it. Here is the root cause. Here is the evidence.
 > I reproduced it. Here is the tested fix. Approve?
 
-The bar is not demo quality. The bar is whether an on-call engineer would trust this
-at 3 AM.
+It is a multi-tenant product. A workspace signs up with GitHub, installs the GitHub
+App on the repositories it chooses, connects Datadog or Sentry and Slack, and adds a
+service to watch.
 
-## 2. Current architecture (the audit)
+## 2. Running system
 
-There was none. This repository was created on 2026-09-13 as a greenfield build.
+```
+ browser ──▶ apps/web  (Next.js console, Auth.js GitHub sign-in)
+               │  one-minute HMAC token naming user + workspace
+               ▼
+             apps/api  (Fastify)  ── Postgres ──  apps/worker
+               │  console routes, integrations,        │  polls every enabled service,
+               │  GitHub/Slack installs, webhooks      │  runs incidents from a job queue
+               ▼                                       ▼
+        GitHub App · Slack app · Datadog · Sentry · Notion · Resend · Anthropic · Dodo Payments
+```
 
-Audit findings, recorded so the "reuse existing conventions" rule has something to
-point at:
+- **apps/web** is the console. Sign-in is GitHub OAuth through the operator's GitHub
+  App. The console never reads the database. It calls the API from its own server,
+  presenting a one-minute token signed with `PAGER_SESSION_SECRET` that names the user
+  and the workspace. No token reaches a browser.
+- **apps/api** re-reads the membership on every request and takes the workspace only
+  from the token. It owns the onboarding flows: the GitHub App install (the setup
+  callback is accepted only with a state it signed, and after GitHub confirms, from
+  the installer's own OAuth code, that the installer can see the installation), the
+  Slack OAuth v2 install, integration credentials and connection tests, services, the
+  plan and budget, and the GitHub and Sentry webhooks.
+- **apps/worker** holds nothing between jobs. Several workers can share one database.
+  - **Queue:** `jobs`, claimed with `FOR UPDATE SKIP LOCKED` under a transaction-scoped
+    advisory lock, with a global cap on running jobs.
+  - **Leases:** each job has a lease and a heartbeat. A killed worker's lease expires
+    and another worker reclaims the job.
+  - **Polls:** every enabled service has a `poll` job queued. It probes the service's
+    health URL for the deployed revision and asks the alert source whether anything
+    novel is failing. Each distinct novel failure becomes a `run_incident` job, one per
+    (revision, failure).
+  - **Checkpoints:** an incident run records checkpoints in `revision_runs` (incident,
+    ticket, Slack thread, branch, pull request), so a restarted worker resumes rather
+    than repeats.
+  - **Aftermath:** after the pull request, `await_merge` and `verify_recovery` jobs wait
+    on the human merge and the deploy.
+  - **Merge clicks:** Slack's interactivity requests reach the worker at
+    `/slack/interactions`.
+- **Postgres** is the only shared state; the API migrates it before each deploy.
+  PGlite, which is PostgreSQL compiled to WASM, serves development and tests with the
+  same schema and migrations. No component uses Redis. The `redis` service in
+  `docker-compose.yml` and `REDIS_URL` are leftovers.
 
-| Dimension | Finding |
+## 3. Tenancy and authentication
+
+| Concern | How |
 | --- | --- |
-| Repository structure | Empty. No prior art anywhere under `~`. |
-| Framework / package manager | None chosen. Selected here: pnpm workspaces, TypeScript. |
-| Database | None. Selected: PostgreSQL 17 + Drizzle ORM. |
-| Authentication | None. Deferred — single-org local deployment for the MVP. |
-| API conventions | None. Selected: Fastify, REST, zod-validated at the boundary. |
-| Frontend | None. Selected: Next.js App Router + Tailwind + shadcn/ui. |
-| Tests | None. Selected: Vitest. |
-| CI | None. GitHub Actions added in Phase 1. |
-| Existing integrations | None. |
-| Env var handling | None. Selected: `.env` + a single zod-parsed config module. |
-
-Two deviations from the recommended stack in the brief, both deliberate:
-
-- **Fastify instead of NestJS.** The brief says "NestJS or equivalent". Pager's
-  backend is an event-driven orchestrator, not a CRUD API, so NestJS's DI and
-  decorator machinery buys little and costs build complexity. Module boundaries are
-  enforced by workspace packages instead.
-- **Drizzle instead of Prisma.** The brief requires relational structure rather than
-  JSON blobs (§16). Drizzle's schema is plain TypeScript, so the domain types and the
-  table definitions cannot drift apart.
-
-## 3. Target architecture
-
-```
-                          PAGER DEVELOPER
-
-                         Event Ingestion
-                                │
-        ┌───────────────────────┼───────────────────────┐
-      GitHub                 Datadog                  Slack
-        └──────────────── Arga Labs Twins ─────────────┘
-                                │
-                            Event Bus                 (BullMQ / Redis)
-                                │
-                       Deployment Observer            Phase 1
-                                │
-                       Regression Detector            Phase 2
-                                │
-                         Incident Engine              Phase 2
-                                │
-                    Investigation Orchestrator        Phase 3
-                                │
-                      Reproduction Sandbox            Phase 5
-                                │
-                            Fix Agent                 Phase 5
-                                │
-                        Validation Engine             Phase 5
-                                │
-                          Policy Engine               Phase 6
-                                │
-                         Approval Engine              Phase 6
-                                │
-                        Recovery Verifier             Phase 6
-
-          every agent execution ──────────────▶ Lemma
-```
-
-The two external systems answer different questions, and conflating them would be the
-central design error:
-
-- **Arga Labs** answers *what happened in the external applications*.
-- **Lemma** answers *did Pager Developer itself behave correctly*.
-- **Deterministic tests** answer *does the generated code actually work*.
-
-None of the three substitutes for another. In particular, a patch is never "verified"
-because a model or a Lemma evaluation approved it; it is verified when a test that
-failed before the patch passes after it.
+| Sign-in | GitHub OAuth (Auth.js), with the GitHub App's client. The first sign-in creates a workspace with the person as owner. |
+| Console → API | One-minute HMAC token (`api-session`) naming user and workspace; the membership is re-read per request. |
+| Roles | owner, admin, member. Installing integrations and adding services needs owner or admin; the budget, owner. |
+| Isolation | Every tenant table carries `organization_id`; queries are scoped by it; a test suite checks every console route across two workspaces. |
+| Tenant secrets | Envelope encryption: AES-256-GCM with a data key per row, wrapped by `PAGER_MASTER_KEY`. The workspace and kind of secret are the AAD. `KeyWrapper` is the seam for a KMS. |
+| GitHub | One operator App. Every job mints an installation token narrowed to the one repository it works on. |
+| Slack | One operator app; each workspace installs it and its bot token goes straight into the vault. Members are linked by email so a merge click is attributable to a person. |
+| Plans | `plans` rows (limits: services per workspace, incidents per month, included model spend). Paid plans are Dodo Payments subscriptions: `billing_subscriptions` holds Dodo's last reading, and `organizations.plan_id` follows it (§11). |
 
 ## 4. Package layout
 
 ```
 packages/
-  core/          domain types, zod schemas, incident state machine, policy engine
-  db/            Drizzle schema, migrations, repositories
-  providers/     provider interfaces + Arga / real / local adapters
-  observability/ Lemma instrumentation wrapper, AgentRun + ToolCall recording
-  agents/        DeploymentObserver, RegressionDetector, IncidentInvestigator,
-                 RepositoryInvestigator, ReproductionAgent, FixAgent,
-                 ValidationAgent, CommunicationAgent, RecoveryVerifier
-  sandbox/       isolated git worktree + command execution
-  twin-local/    offline deterministic twin server (CI, no-credential dev)
+  core/          domain types, zod schemas, incident state machine, policy engine,
+                 signed tokens, envelope encryption, redaction, service config rules
+  db/            Drizzle schema and migrations, repositories, the job queue, the vault
+  providers/     vendor adapters against the real APIs: GitHub (REST + git over HTTPS),
+                 Datadog, Sentry, Slack, Jira, Linear, Notion, Resend, Dodo Payments; the GitHub App
+                 client; connection tests; safe fetch; the registry for development
+  observability/ the tracer: every agent run and tool call recorded, locally and to Lemma
+  agents/        the workflow, production watcher, investigator, patch generators,
+                 recovery verifier, usage metering
+  sandbox/       a shallow clone of the deployed revision, dependency install, runners
+                 (local process, Docker), validation, reproduction, patch policy
+  twin-local/    in-process twins of every vendor, the GitHub one serving real git
 apps/
-  api/           Fastify HTTP API + BullMQ workers
-  web/           Next.js dashboard
-evals/           Arga scenarios INC-001..INC-012 + evaluation harness
+  api/           the Fastify API
+  web/           the Next.js console and landing page
+  worker/        the multi-tenant worker
+evals/           the benchmark (evals/src/bench), the end-to-end demos, the agent eval,
+                 the opt-in contract tests (evals/contract)
+demo/            runnable demo services: checkout-api (Node), orders (express + vitest),
+                 billing (Python)
 ```
 
-## 5. Provider abstraction
+## 5. Providers
 
-The hard requirement is that business logic never knows which backend it is talking
-to. Adapters are constructed with a resolved base URL and credentials; nothing
-downstream of construction branches on `arga` vs `real`.
+Business logic never knows which backend it is talking to. Adapters are written
+against the vendor's real API and constructed with a resolved base URL and
+credentials. Nothing downstream branches on twin versus production. The local twins
+implement the vendors' protocols, git's smart HTTP included, so the same adapter code
+runs against both.
 
-```ts
-interface SourceControlProvider {
-  getDeploymentCommit(ref: DeploymentRef): Promise<Commit>;
-  getCommit(sha: string): Promise<Commit>;
-  getDiff(base: string, head: string): Promise<Diff>;
-  getPullRequest(number: number): Promise<PullRequest>;
-  createBranch(from: string, name: string): Promise<Branch>;
-  createPullRequest(input: CreatePullRequestInput): Promise<PullRequest>;
-}
+The interfaces (`packages/providers/src/types.ts`):
 
-interface ObservabilityProvider { /* metrics, logs, monitors, traces */ }
-interface MessagingProvider     { /* threads, posts, approval prompts   */ }
-interface IssueTrackerProvider  { /* Linear, Jira                       */ }
-interface KnowledgeProvider     { /* Notion, Google Docs/Drive          */ }
-interface DeploymentProvider    { /* deploy, rollback                   */ }
-```
+- `SourceControlProvider`: commits, diffs, comparisons, files, the default branch,
+  branches, pull requests, commits of file changes, merge (pinned to a head sha), and
+  a clone URL with a git auth environment that keeps the token out of URLs and disk.
+- `ObservabilityProvider`: metric series, logs and monitors, and its `backend`.
+- `AlertSource`: where incidents are noticed, meaning what is alerting and the errors
+  behind it. Those errors come either as log lines for the watcher to cluster
+  (Datadog) or as groups the backend already structured, with typed in-app frames
+  (Sentry). It is polled. A push (Sentry's webhook) wakes the service's poll rather
+  than bypassing it.
+- `MessagingProvider`, `IssueTrackerProvider`, `KnowledgeProvider`, `EmailProvider`.
+  Trackers and knowledge are optional and resolve to `null` when unconfigured.
 
-Backend selection is config, resolved once at startup by a `ProviderRegistry`:
+The product builds a tenant's providers per job from that workspace's own
+installations and vault entries (`apps/worker/src/tenant.ts`). The registry in
+`packages/providers/src/registry.ts` selects `arga | local | real` backends from the
+environment for the demos and evaluations. Where its `real` backend takes a static
+credential (`GITHUB_TOKEN` and the like), that is development only; the product never
+uses one.
 
-```
-PAGER_SOURCE_CONTROL_BACKEND = arga | real | local
-PAGER_OBSERVABILITY_BACKEND  = arga | real | local
-PAGER_MESSAGING_BACKEND      = arga | real | local
-```
+## 6. An incident
 
-### Arga integration
+1. **Watch.** The watcher lists alerts from the service's alert source, reads the
+   errors in a window that always ends now (capped, so stale errors fall outside it),
+   and groups them into up to three distinct failures, one per root frame. Each is
+   checked against the runbooks' known failure modes: same error type and a named
+   location or message fragment, never a substring. Each novel failure is its own
+   incident.
+2. **Identify.** The deployed revision comes from the service itself, via its health
+   URL, never from a branch head. Stack paths are mapped onto the repository's own
+   files at that revision.
+3. **Open, notify, investigate.** Open the incident, the ticket and one Slack thread.
+   The investigator works with read-only tools. If it abstains, or reaches no
+   diagnosis, the incident is handed over.
+4. **Did the deployment cause it?** If the same failure was already happening in the
+   hour before the deploy, it is handed over rather than repaired as this deploy's
+   regression.
+5. **Sandbox.** A shallow, blob-filtered clone of the deployed sha. Dependencies are
+   installed frozen from the lockfile with lifecycle scripts off, cached by lockfile
+   hash, and the install is the only step with network. The suite then runs twice, and
+   the tests that fail in both runs, or in one, are set aside by name.
+6. **Reproduce.** A new regression test must fail against the deployed code, twice, for
+   the predicted reason, as an assertion and not a load error.
+7. **Patch and validate.** The patch may not touch tests, CI, lockfiles or runner
+   config. The regression test must then pass twice, and the whole suite must be green
+   apart from the set-aside tests, without shrinking. There is one repair attempt.
+8. **Pull request**, carrying the evidence, what was set aside and why, and how to
+   roll back.
+9. **After the human merge**, wait for the deploy, then compare metrics either side.
+   The verdict is RECOVERED, NOT_RECOVERED or UNVERIFIABLE, and a recovery that was
+   not measured is never claimed. The postmortem goes to Notion and the team is
+   emailed.
 
-Arga provisions ephemeral **Twin Runs**. A run is requested with a list of services
-and a scenario, and once `status: ready` it returns, per twin, a `base_url`, an
-`admin_url` (state inspection and reset) and `env_vars` (credentials).
+Languages: TypeScript and JavaScript (node:test, vitest, jest; npm, pnpm, yarn, bun)
+and Python (pytest; uv or a fully pinned requirements file).
 
-```
-POST /twins  { twins: ["github","datadog","slack"], ttl_minutes, scenario_id }
-  → { run_id }
-poll until status === "ready"
-  → { twins: { github: { base_url, admin_url, env_vars }, ... }, expires_at }
-```
+## 7. Evidence and the data model
 
-This maps directly onto the design: a `TwinRun` is the single place provider URLs
-enter the system. `admin_url` is what makes the evaluation suite deterministic — it
-gives per-scenario seeding and reset, and lets an eval assert on **side effects**
-(was a branch really created? was that Slack message really sent?) rather than on the
-agent's own account of what it did.
+`evidence` is the spine. Every row cites the tool call that produced it
+(`source_tool_call_id`, `NOT NULL`, foreign-keyed to `tool_calls`), so a fabricated
+observation is refused by the database as well as by the code. Observability evidence
+is `OBS_METRIC`, `OBS_LOG` or `OBS_ALERT` with a `backend` column; it is never named
+for a vendor. Provenance is `OBSERVED` or `DERIVED`, so an inference is never rendered
+as a reading.
 
-Twin Runs expire; after `expires_at` twin URLs return `410 environment_destroyed`.
-The registry treats expiry as a first-class error, not a transport failure.
+The incident state machine is an explicit allow-list in `packages/core`, and the
+workflow advances only forward along it. The model proposes; the state machine
+decides.
 
-## 6. Lemma instrumentation
+## 8. Permissions
 
-One incident is one coherent Lemma thread. Every agent execution is a trace; every
-tool call and model call is recorded inside it.
+Every write is checked against the policy engine at the service's autonomy level
+(L0–L5, default L3: may open a pull request, may not execute remediation). Some
+capabilities are prohibited at every level: push to the default branch, delete
+production data, modify a production database, modify IAM, rotate credentials,
+destroy infrastructure, execute arbitrary production commands, deploy arbitrary code,
+disable security controls. Merging needs L4 plus a verified Slack click by a linked
+owner or admin, pinned to the reviewed commit. See [SECURITY.md](../SECURITY.md).
 
-```ts
-lemma.trace({ name: "incident-investigator", threadId: incident.id, input }, async (t) => {
-  t.recordTool({ name: "github.readDiff", input, output });
-  t.recordGeneration({ name: "hypothesis-generation", input, output, model });
-});
-```
+## 9. Model usage
 
-Instrumentation is not optional decoration: the same wrapper that emits to Lemma also
-writes `AgentRun` and `ToolCall` rows locally, so the product UI and the evaluation
-suite read from the same record. A tool call that fails is recorded as failed — the
-agent is never permitted to silently drop one.
+Model calls go through a meter that prices them from Anthropic's published rates. An
+unknown model is priced as unknown, never as free. Usage is recorded per workspace,
+and a run stops, and says so, when the workspace's monthly budget is reached. The
+stable part of the prompt is cached.
 
-Lemma evaluations encode the behavioural invariants:
+## 10. Evaluation
 
-- never claim a test passed unless it was executed
-- never claim root cause confirmed without supporting evidence
-- never perform a production write without authorization
-- never mark an incident resolved before recovery verification
-- distinguish fact from hypothesis
-- never fabricate telemetry
-- never silently ignore a failed tool call
+- `pnpm bench`: 33 generated scenarios across three repositories and two languages.
+  24 are bugs of nine kinds; 9 are negative controls where the right action is no pull
+  request. Each pull request is judged against a hidden oracle on a fresh clone. The
+  runs are repeated, reported with Wilson intervals, and the report says whether a
+  model or a script did the authoring. See [benchmark.md](benchmark.md).
+- `pnpm demo:e2e`: the three demo services, from alert to pull request, through
+  Datadog and through Sentry.
+- `pnpm test:contract`: the adapters against the vendors' real APIs, opt-in.
+- CI runs `pnpm verify`, the deterministic benchmark subset and the end-to-end demos.
 
-We do **not** store raw chain-of-thought. Traces carry structured summaries and
-evidence references.
+## 11. Deployment
 
-## 7. Data model
+The console deploys to Vercel; `render.yaml` declares the API and Postgres, and the
+API migrates before each deploy. The worker runs on a Docker host
+(`deploy/worker/compose.yaml`), starting a sibling container per sandbox command from
+`docker/sandbox.Dockerfile`, because open sign-up means running strangers' test
+suites and Render has no Docker daemon. [launch.md](launch.md) is the sequence, and
+`pnpm launch:check` checks a running deployment.
 
-Relational, not JSON soup (§16). Core entities:
+Billing: the console opens a Dodo Payments checkout (`POST /checkouts`) with the
+workspace in its metadata and records the session. Dodo's signed webhooks name a
+subscription; the API reads it back and applies it, so deliveries out of order or
+retried change nothing twice. `active` and `past_due` keep the paid plan; anything
+else returns the workspace to Free. The price shown on `/pricing` is read from the
+Dodo product.
 
-`Organization`, `User`, `Integration`, `Service`, `Repository`, `Deployment`,
-`TelemetrySnapshot`, `Regression`, `Incident`, `IncidentEvent`, `Evidence`,
-`Investigation`, `Hypothesis`, `FixCandidate`, `Reproduction`, `ValidationRun`,
-`Approval`, `RecoveryVerification`, `AgentRun`, `ToolCall`, `AuditLog`, `Policy`.
+## 12. The original plan (2026-09-13)
 
-`Evidence` is the spine. Every hypothesis and every externally-communicated claim
-references evidence rows by id. A claim with no evidence cannot be promoted to a
-fact — this is enforced in application code, not left to the model's discretion.
+Kept for the reasoning. It is superseded where it disagrees with the sections above.
 
-## 8. Incident state machine
+The repository started empty. The choices made then still hold:
 
-```
-HEALTHY → DEPLOYMENT_OBSERVED → OBSERVING → REGRESSION_DETECTED → INCIDENT_OPEN
-  → INVESTIGATING → ROOT_CAUSE_SUSPECTED → ROOT_CAUSE_CONFIRMED → REPRODUCING
-  → FIXING → VALIDATING → FIX_READY → AWAITING_APPROVAL → APPROVED
-  → DEPLOYING_FIX → VERIFYING_RECOVERY → RESOLVED
-```
+- **Fastify instead of NestJS:** the backend is an orchestrator, not a CRUD API.
+- **Drizzle instead of Prisma:** the schema is plain TypeScript, so the domain types
+  and the tables cannot drift apart.
+- **PGlite for development and tests:** real PostgreSQL in process, so the evaluation
+  suite cannot be blocked on infrastructure being up.
 
-Terminal / branching: `FALSE_POSITIVE`, `EXTERNAL_INCIDENT`, `FIX_FAILED`,
-`APPROVAL_REJECTED`, `ROLLBACK_REQUESTED`, `UNRESOLVED`.
+The plan named a BullMQ/Redis event bus, a git-worktree sandbox, "authentication:
+deferred", and twelve Arga scenarios. None was built that way:
 
-Transitions are a explicit allow-list in `packages/core`. The model proposes; the
-state machine decides. An invalid transition throws and is audited.
+- The queue is Postgres.
+- The sandbox is a clone into a temporary directory.
+- Authentication is §3.
+- The evaluation is §10.
 
-## 9. Agent architecture
+Arga's constraints found then still apply to the `arga` backend:
 
-No single agent with every tool. Nine specialized components under deterministic
-orchestration.
-
-The split of authority is absolute:
-
-| The model may decide | Application code decides |
-| --- | --- |
-| hypotheses | permissions |
-| investigation strategy | state transitions |
-| which evidence is relevant | which tools are available |
-| candidate fixes | approval requirements |
-| how to phrase a Slack update | execution limits, production boundaries |
-
-The model never defines its own security policy. All model output is schema-validated
-before it is allowed to affect state.
-
-## 10. Permissions and security
-
-Default-allowed: read telemetry, read repositories, read documentation, write
-sandbox, write fix branch, open pull request, write Slack thread, write issue tracker.
-
-Default-prohibited: push to main, delete production data, modify production
-databases, modify IAM, rotate credentials, destroy infrastructure, execute arbitrary
-production commands, deploy arbitrary code, disable security controls.
-
-Every tool declares `name`, `description`, input/output schema, permission, risk
-level, timeout, retry policy and audit behaviour. Risk levels: `READ_ONLY`,
-`WRITE_NON_PRODUCTION`, `PRODUCTION_WRITE` (always requires approval).
-
-Autonomy levels L0–L5, defaulting to **L3** (may open a PR, may not execute
-remediation). The level is config, and raising it is an explicit operator act.
-
-## 11. Six phases
-
-| Phase | Goal | Exit criterion |
-| --- | --- | --- |
-| 1 | Connect & observe | Pager reconstructs a deployment from an Arga scenario |
-| 2 | Detect regressions | Distinguishes real regressions from noise; attribution left open |
-| 3 | Investigate | Evidence-backed hypotheses and a deployment attribution verdict |
-| 4 | Communicate | One Slack thread per incident, no unsupported claims |
-| 5 | Fix & verify | Reproduction fails before fix, passes after; PR opened |
-| 6 | Approve, recover, learn | Human approval, remediation, verified recovery |
-
-Each phase ends runnable and committed. Vertical slices, not six disconnected
-systems integrated at the end.
-
-## 12. Evaluation strategy
-
-Twelve scenarios, `INC-001`..`INC-012`, seeded into Arga. Crucially four of them have
-an **innocent deployment** (`INC-009` third-party outage, `INC-010` traffic spike,
-`INC-011` misconfigured monitor with healthy production, `INC-012` regression from an
-older deployment). Correlation is not causation: a system that always blames the most
-recent deploy scores well on the other eight and is worthless.
-
-Per scenario: seed Arga → run Pager → capture the Lemma trace → evaluate the outcome
-→ inspect side effects via `admin_url` → reset.
-
-Metrics: detection accuracy, false positive/negative rate, attribution accuracy,
-root-cause accuracy, reproduction rate, fix success rate, unsafe action rate, and the
-time-to-X series.
-
-The metric that gates everything: **unsafe action rate must be 0**.
-
-## 13. Local infrastructure decision (recorded during Phase 1)
-
-This machine has no local Docker daemon — the only configured Docker context is a
-remote host reachable over Tailscale — and no local PostgreSQL. Starting containers
-on someone else's machine is not something this task asked for, so the database layer
-supports two drivers behind one schema:
-
-- `postgres://…` — a real server. This is the production path, and what
-  `docker-compose.yml` provisions.
-- `pglite://memory` or `pglite://<dir>` — PostgreSQL compiled to WASM, running in
-  process. This is the local development and test path.
-
-PGlite is real PostgreSQL rather than a SQLite-shaped approximation, so the same
-Drizzle schema, migrations and queries serve both. The practical benefit is that the
-evaluation suite cannot be blocked on infrastructure being up.
-
-Schema tests run against a real engine and assert the constraints the safety model
-depends on — in particular that `evidence.source_tool_call_id` is `NOT NULL` and
-foreign-keyed to `tool_calls`, so fabricated evidence is refused by the database and
-not only by application code.
-
-## 14. Arga constraints discovered in Phase 1
-
-Verified against the live API on 2026-09-13; see `CLAUDE.md` for the operational
-detail. The three that shape the design:
-
-1. **One twin per run, ten-minute TTL** (free plan). Scenarios provision per-twin
-   runs rather than one multi-twin environment. This is tolerable because the three
-   twins hold independent data and correlation happens inside Pager. The TTL is the
-   sharper constraint: a full incident lifecycle must fit inside it, which is why an
-   expired environment is a distinct error type rather than a retryable failure.
-
-2. **Twins issue no credentials in `envVars`.** Authentication is via the GitHub App
-   Manifest flow. Since that is also the correct production design, Pager
-   authenticates as a GitHub App everywhere, with scoped short-lived installation
-   tokens rather than a long-lived PAT.
-
-3. **The GitHub twin does not compute diffs.** This is a genuine fidelity limit, not
-   a bug in our adapter. `getDiff` degrades through compare → tree comparison and,
-   when all routes are empty, the DeploymentObserver records a gap. It never reports
-   an empty file list as though nothing changed, because an investigation would use
-   that to exonerate a deployment.
-
-Point 3 is the reason the local twin (`packages/twin-local`) is worth building rather
-than being a convenience: it gives the evaluation suite a source-control twin that
-can express a real file-level diff, which the hosted twin currently cannot.
+- one twin per run, with a ten-minute TTL
+- no credentials in `envVars`, so the GitHub App manifest flow is the way in
+- no computed diffs
+- git clone over HTTPS is almost certainly not supported (untested), and the sandbox
+  now needs it.

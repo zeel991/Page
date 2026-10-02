@@ -471,6 +471,12 @@ export class GitHubProvider implements SourceControlProvider {
     return res ? { name: res.ref.replace(/^refs\/heads\//, ''), sha: res.object.sha } : null;
   }
 
+  async getDefaultBranch(repo: string): Promise<string> {
+    const res = await this.http.get<{ default_branch?: string }>(`/repos/${repoPath(repo)}`);
+    if (!res.default_branch) throw new Error(`GitHub did not report a default branch for ${repo}`);
+    return res.default_branch;
+  }
+
   async createPullRequest(repo: string, input: CreatePullRequestInput): Promise<PullRequest> {
     const res = await this.http.post<GhPullRequest>(`/repos/${repoPath(repo)}/pulls`, {
       title: input.title,
@@ -542,9 +548,12 @@ export class GitHubProvider implements SourceControlProvider {
    */
   cloneUrl(repo: string): string {
     const url = new URL(this.baseUrl);
-    // api.github.com/repos/... is served from github.com for git operations.
+    // Git is served from the web host: api.github.com -> github.com, and a GitHub
+    // Enterprise Server's https://host/api/v3 -> https://host. Any other base path
+    // is kept, since it is part of where the server lives.
     const host = url.host.startsWith('api.') ? url.host.slice(4) : url.host;
-    return `${url.protocol}//${host}/${repoPath(repo)}.git`;
+    const path = url.pathname.replace(/\/+$/, '').replace(/\/api\/v3$/, '');
+    return `${url.protocol}//${host}${path}/${repoPath(repo)}.git`;
   }
 }
 

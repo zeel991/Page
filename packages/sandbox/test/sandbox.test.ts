@@ -6,7 +6,10 @@ import {
   registerViaManifest,
 } from '@pager/providers';
 import { INC_001, LocalTwinServer, seedFromFixture } from '@pager/twin-local';
-import { homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Sandbox, SandboxPathError } from '../src/sandbox.js';
 import { sandboxEnvironment } from '../src/runner.js';
 import { profileRepository } from '../src/repository-profile.js';
@@ -65,8 +68,36 @@ describe('Sandbox containment', () => {
       HOME: '/s/home',
       TMPDIR: '/s/tmp',
       CI: '1',
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      PYTHONDONTWRITEBYTECODE: '1',
       NODE_ENV: 'test',
     });
+  });
+
+  it('runs the Python on disk after a same-length edit, not stale bytecode', async () => {
+    // Found by the benchmark: "+ credit" patched to "- credit" within the same second
+    // left the fix unrun, and a correct patch was rejected.
+    const s = await makeSandbox();
+    const { utimes, stat } = await import('node:fs/promises');
+    await s.writeFile('calc.py', 'def f(a, b):\n    return a + b\n');
+    const pinned = (await stat(join(s.dir, 'calc.py'))).mtime;
+    const first = await s.run('python3', ['-c', 'import calc; print(calc.f(5, 1))']);
+    expect(first.stdout.trim()).toBe('6');
+    await s.writeFile('calc.py', 'def f(a, b):\n    return a - b\n');
+    await utimes(join(s.dir, 'calc.py'), pinned, pinned);
+    const second = await s.run('python3', ['-c', 'import calc; print(calc.f(5, 1))']);
+    expect(second.stdout.trim()).toBe('4');
+  });
+
+  it('reads a runner that colours its output anyway', async () => {
+    // vitest colours its summary under CI=1; the escape codes hid "Tests  1 failed".
+    const s = await makeSandbox();
+    const v = new ValidationEngine(s);
+    await s.writeFile('emit.cjs', 'process.stdout.write("\\u001b[2m Tests \\u001b[22m \\u001b[31m1 failed\\u001b[39m | 2 passed\\n"); process.exit(1);\n');
+    const run = await v.runCheck('test', 'node emit.cjs');
+    expect(run.output).toBe('Tests  1 failed | 2 passed');
+    expect(run).toMatchObject({ testsFailed: 1, testsPassed: 2 });
   });
 
   it('does not leak this process environment or home directory into a child', async () => {
@@ -79,7 +110,7 @@ describe('Sandbox containment', () => {
       const result = await s.run('node', ['-e', 'console.log(JSON.stringify(process.env))']);
       const env = JSON.parse(result.stdout) as Record<string, string>;
       // macOS adds __CF_USER_TEXT_ENCODING to every process; it is not inherited from us.
-      expect(Object.keys(env).filter((k) => !k.startsWith('__CF_')).sort()).toEqual(['CI', 'HOME', 'NODE_ENV', 'PATH', 'TMPDIR']);
+      expect(Object.keys(env).filter((k) => !k.startsWith('__CF_')).sort()).toEqual(['CI', 'FORCE_COLOR', 'HOME', 'NODE_ENV', 'NO_COLOR', 'PATH', 'PYTHONDONTWRITEBYTECODE', 'TMPDIR']);
       expect(env.HOME).not.toBe(homedir());
       expect(env.HOME!.startsWith(s.root)).toBe(true);
       // Outside the working copy, so a test runner never discovers it.
@@ -141,15 +172,39 @@ describe('Sandbox containment', () => {
     expect(result.stdout).toContain('; rm -rf /');
   });
 
-  it('refuses to build a sandbox from a truncated tree listing', async () => {
-    // A working copy missing files is not the tree that is failing.
-    const partial = { listFiles: async () => ({ paths: ['src/a.ts'], truncated: true }), getFile: async () => 'x' };
-    await expect(Sandbox.create(partial as never, 'acme/checkout-api', 'abc')).rejects.toThrow(/only part of/);
+  it('checks out the pinned revision byte for byte, binary files included', async () => {
+    // A real repository holding bytes that are not valid UTF-8. Reading every file
+    // through the API and decoding it as text replaced these with U+FFFD.
+    const origin = await mkdtemp(join(tmpdir(), 'pager-origin-'));
+    try {
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x80]);
+      await writeFile(join(origin, 'logo.png'), bytes);
+      await writeFile(join(origin, 'README.md'), 'hello\n');
+      const git = (args: string[]) => execFileSync('git', args, { cwd: origin, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+      git(['init', '-q']);
+      git(['config', 'uploadpack.allowFilter', 'true']);
+      git(['config', 'uploadpack.allowAnySHA1InWant', 'true']);
+      git(['add', '.']);
+      git(['commit', '-q', '-m', 'binary']);
+      const sha = git(['rev-parse', 'HEAD']).trim();
+      const local = { cloneUrl: () => `file://${origin}`, gitAuthEnvironment: async () => ({}) };
+
+      sandbox = await Sandbox.create(local, 'local/origin', sha);
+      expect((await readFile(join(sandbox.dir, 'logo.png'))).equals(bytes)).toBe(true);
+      expect((await sandbox.run('git', ['rev-parse', 'HEAD'])).stdout.trim()).toBe(sha);
+    } finally {
+      await rm(origin, { recursive: true, force: true });
+    }
   });
 
-  it('refuses to build a sandbox from an empty revision', async () => {
-    const empty = { ...github, listFiles: async () => ({ paths: [], truncated: false }) } as unknown as GitHubProvider;
-    await expect(Sandbox.create(empty, 'acme/checkout-api', 'abc')).rejects.toThrow(/no files/);
+  it('refuses to build a sandbox from a revision the repository does not have', async () => {
+    await expect(Sandbox.create(github, 'acme/checkout-api', 'f'.repeat(40))).rejects.toThrow(/git fetch.*failed/);
+  });
+
+  it('keeps the credential out of the working copy', async () => {
+    const s = await makeSandbox();
+    const config = await readFile(join(s.dir, '.git', 'config'), 'utf8');
+    expect(config).not.toMatch(/ghs_|x-access-token|Authorization/i);
   });
 });
 

@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { ReproductionAgent } from '../src/reproduction.js';
 import { ValidationEngine } from '../src/validation.js';
 import { singleTestCommand, type RepositoryProfile } from '../src/repository-profile.js';
-import type { SourceControlProvider } from '@pager/providers';
 import { Sandbox } from '../src/sandbox.js';
 
 /**
@@ -18,14 +17,6 @@ import { Sandbox } from '../src/sandbox.js';
  */
 
 /** A source control provider serving a fixed set of files, for sandbox creation. */
-function provider(files: Record<string, string>): SourceControlProvider {
-  return {
-    kind: 'source-control',
-    async listFiles() { return { paths: Object.keys(files), truncated: false }; },
-    async getFile(_r, _ref, path) { return files[path] ?? null; },
-  } as unknown as SourceControlProvider;
-}
-
 const WORKING_MODULE = `export function total(items) {
   return items.reduce((s, i) => s + i, 0);
 }
@@ -47,7 +38,7 @@ it('totals an empty basket as zero', () => {
 
 async function build(files: Record<string, string>) {
   const root = await mkdtemp(join(tmpdir(), 'pager-assert-'));
-  const sandbox = await Sandbox.create(provider(files), 'acme/demo', 'rev-1', { rootDir: root });
+  const sandbox = await Sandbox.fromFiles(files, 'rev-1', { rootDir: root });
   const validation = new ValidationEngine(sandbox);
   return {
     sandbox,

@@ -7,6 +7,7 @@ import {
   NotionProvider,
   PAGER_APP_MANIFEST,
   ResendProvider,
+  SentryProvider,
   SlackProvider,
   registerViaManifest,
 } from '@pager/providers';
@@ -16,10 +17,12 @@ import { INC_001, INC_009, INC_011, LocalTwinServer, seedFromFixture } from '@pa
 import {
   IncidentWorkflow,
   TELEMETRY_WINDOW_MINUTES,
+  isTestFile,
   pullRequestTitle,
   telemetryWindowsFor,
 } from '../src/workflow.js';
 import { NoPatchGenerator, ScriptedPatchGenerator } from '../src/patch-generator.js';
+import { SCRIPTS } from '../src/sample-scripts.js';
 
 let server: LocalTwinServer;
 
@@ -121,6 +124,97 @@ const input = {
 
 afterEach(async () => {
   await server?.stop();
+});
+
+describe('Sentry as the alert source', () => {
+  it('is noticed through Sentry’s issues, reads its structured frames, and says Sentry in the pull request', async () => {
+    const { deployment, endpoints } = await build(INC_001, 'scripted');
+    const tokens = new GitHubAppTokenSource(endpoints.github, await registerViaManifest(endpoints.github, PAGER_APP_MANIFEST(endpoints.github)));
+    const sink = new InMemorySink();
+    const workflow = new IncidentWorkflow({
+      observability: new DatadogProvider({ baseUrl: endpoints.datadog }),
+      alerts: new SentryProvider({ baseUrl: endpoints.sentry, token: 'sntrys_test', organization: 'acme', now: () => new Date('2026-09-13T15:10:00Z') }),
+      sourceControl: new GitHubProvider({ baseUrl: endpoints.github, tokenProvider: () => tokens.token() }),
+      messaging: new SlackProvider({ baseUrl: endpoints.slack }),
+      issueTracker: null,
+      knowledge: null,
+      email: null,
+      tracer: new AgentTracer({ sink, lemma: null }),
+      now: () => new Date('2026-09-13T15:10:00Z'),
+      patchGenerator: new ScriptedPatchGenerator(SCRIPTS['INC-001']!),
+    });
+    const result = await workflow.run({ ...input, deployment });
+    expect(result.haltReason).toBeNull();
+    expect(result.alert).toMatchObject({ backend: 'sentry', alertNoun: 'Sentry issue' });
+    expect(result.alert!.primary!.topApplicationFrame).toMatchObject({ file: 'src/checkout/service.ts', line: 20, functionName: 'CheckoutService.createOrder' });
+    const tools = sink.toolCalls.map((c) => c.toolName);
+    expect(tools).toEqual(expect.arrayContaining(['observability.listAlerts', 'observability.readErrors']));
+    expect(tools.some((t) => t.startsWith('datadog.'))).toBe(false);
+    const pr = server.current.repositories.get('acme/checkout-api')!.pullRequests.find((p) => p.number === result.pullRequest!.number)!;
+    expect(pr.body).toMatch(/Sentry issue "CHECKOUT-API-1: TypeError/);
+    expect(pr.body).not.toMatch(/Datadog monitor/);
+  });
+});
+
+describe('failures the deployment did not cause', () => {
+  it('hands over, without a pull request, a failure that was already happening before the deployment', async () => {
+    // Found by the benchmark: with no model investigating, nothing noticed the same
+    // error an hour before the deploy, and a "fix" for this deploy was opened.
+    const logs = INC_001.logs!.map((l) => (l.level === 'error' ? { ...l, from: '2026-09-13T13:50:00Z', count: 40, intervalSeconds: 90 } : l));
+    const { workflow, deployment } = await build({ ...INC_001, logs }, 'scripted');
+    const result = await workflow.run({ ...input, deployment });
+    expect(result.pullRequest).toBeNull();
+    expect(result.haltReason).toMatch(/predates the deployment/);
+    expect(server.current.repositories.get('acme/checkout-api')!.pullRequests.filter((p) => p.number > 377)).toEqual([]);
+  });
+
+  it('still repairs a failure that began after it', async () => {
+    const { workflow, deployment } = await build(INC_001, 'scripted');
+    expect((await workflow.run({ ...input, deployment })).pullRequest).not.toBeNull();
+  });
+});
+
+describe('repositories that are not the demo', () => {
+  it('does not let a test that was already failing block the incident, and says which it set aside', async () => {
+    // The deployed revision ships a broken, unrelated test alongside the bug.
+    const LEGACY = `import { it } from 'node:test';\nimport assert from 'node:assert/strict';\nit('legacy importer keeps totals', () => assert.equal(1, 2));\n`;
+    const commits = INC_001.commits.map((c, i, all) =>
+      i === all.length - 1 ? { ...c, changes: [...c.changes, { path: 'test/legacy.test.ts', content: LEGACY }] } : c,
+    );
+    const { workflow, deployment } = await build({ ...INC_001, commits }, 'scripted');
+    const result = await workflow.run({ ...input, deployment });
+    expect(result.haltReason).toBeNull();
+    expect(result.suiteBaseline).toMatchObject({ passed: false, known: true, failing: ['legacy importer keeps totals'] });
+    const repo = server.current.repositories.get('acme/checkout-api')!;
+    const pr = repo.pullRequests.find((p) => p.number === result.pullRequest!.number)!;
+    expect(pr.body).toMatch(/Excluded from the gate/);
+    expect(pr.body).toContain('`legacy importer keeps totals`');
+  });
+
+  it('recognises test files by the runners’ conventions, not by a list of names', () => {
+    for (const path of ['src/cart/pricing.test.ts', 'lib/api.spec.js', 'tests/test_orders.py', 'app/orders_test.py', '__tests__/cart.jsx', 'test/integration/checkout.mjs']) {
+      expect(isTestFile(path), path).toBe(true);
+    }
+    for (const path of ['src/checkout/service.ts', 'test/fixtures/order.json', 'test/helpers/build.ts', 'src/testing.ts']) {
+      expect(isTestFile(path), path).toBe(false);
+    }
+  });
+
+  it('opens the pull request against the repository’s own default branch, not an assumed main', async () => {
+    const trunk = (b: string | undefined) => (b === 'main' ? 'trunk' : b);
+    const fixture = {
+      ...INC_001,
+      defaultBranch: 'trunk',
+      commits: INC_001.commits.map((c) => ({ ...c, ...(c.branch ? { branch: trunk(c.branch)! } : {}) })),
+      pullRequests: (INC_001.pullRequests ?? []).map((p) => ({ ...p, baseRef: trunk(p.baseRef)! })),
+    };
+    const { workflow, deployment } = await build(fixture, 'scripted');
+    const result = await workflow.run({ ...input, deployment });
+    expect(result.haltReason).toBeNull();
+    const repo = server.current.repositories.get('acme/checkout-api')!;
+    expect([...repo.branches.keys()]).not.toContain('main');
+    expect(repo.pullRequests.find((p) => p.number === result.pullRequest!.number)!.baseRef).toBe('trunk');
+  });
 });
 
 describe('IncidentWorkflow', () => {

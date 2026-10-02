@@ -7,6 +7,7 @@ import { Reveal } from '@/components/motion/reveal';
 import { ScrambleText } from '@/components/motion/scramble-text';
 import { ShapeGrid } from '@/components/motion/shape-grid';
 import { Barcode, CircleLink, Marquee, SectionLabel, Wordmark } from '@/components/site/primitives';
+import { SiteFooter } from '@/components/site/doc-page';
 
 /*
  * The public face of the project.
@@ -18,7 +19,7 @@ import { Barcode, CircleLink, Marquee, SectionLabel, Wordmark } from '@/componen
 
 const LINKS = {
   demo: 'https://youtu.be/2Bos0VkR3jg',
-  live: 'https://pager-developer-worker.onrender.com',
+  benchmark: 'https://github.com/zeel991/Page/blob/main/docs/benchmark.md',
   repo: 'https://github.com/zeel991/Page',
   postmortem:
     'https://app.notion.com/p/INC-E505D848ED42-checkout-api-incident-write-up-3da562d1750581ed87bdd3c1d6203be0',
@@ -26,6 +27,7 @@ const LINKS = {
 };
 
 const NAV = [
+  ['Pricing', '/pricing'],
   ['Guarantees', '#guarantees'],
   ['Numbers', '#numbers'],
   ['The loop', '#loop'],
@@ -160,8 +162,8 @@ export default function LandingPage() {
               <span className="mr-2 inline-block size-2 animate-blink rounded-full bg-paper align-middle" />
               On call for checkout-api
             </span>
-            <a href={LINKS.live} target="_blank" rel="noreferrer" className="eyebrow underline-offset-4 hover:underline">
-              Live worker on Render ↗
+            <a href={LINKS.benchmark} target="_blank" rel="noreferrer" className="eyebrow underline-offset-4 hover:underline">
+              The benchmark ↗
             </a>
             <span className="eyebrow opacity-80">Never merges. Never deploys.</span>
           </div>
@@ -240,7 +242,7 @@ export default function LandingPage() {
               { label: 'Error rate, deploy → merge', node: <CountUp value={64.3} decimals={1} suffix="%" />, red: true },
               { label: 'Error rate, after merge', node: <CountUp value={0} suffix="%" /> },
               { label: 'Requests after the fix', node: <CountUp value={1512} /> },
-              { label: 'Tests in pnpm verify', node: <CountUp value={339} /> },
+              { label: 'Tests in pnpm verify', node: <CountUp value={664} /> },
             ].map((s, i) => (
               <div
                 key={s.label}
@@ -461,7 +463,7 @@ export default function LandingPage() {
               <div className="eyebrow text-paper/60">Go</div>
               <ul className="mt-5 space-y-2 text-[15px]">
                 <li><Link href="/signin" className="hover:text-signal">Sign up with GitHub →</Link></li>
-                <li><a href={LINKS.live} target="_blank" rel="noreferrer" className="hover:text-signal">Live worker ↗</a></li>
+                <li><a href={LINKS.benchmark} target="_blank" rel="noreferrer" className="hover:text-signal">Benchmark ↗</a></li>
                 <li><a href={LINKS.demo} target="_blank" rel="noreferrer" className="hover:text-signal">Demo video ↗</a></li>
                 <li><a href={LINKS.postmortem} target="_blank" rel="noreferrer" className="hover:text-signal">Postmortem ↗</a></li>
                 <li><a href={LINKS.repo} target="_blank" rel="noreferrer" className="hover:text-signal">GitHub ↗</a></li>
@@ -471,7 +473,7 @@ export default function LandingPage() {
 
           <footer className="flex flex-wrap items-center justify-between gap-4 border-t border-paper/20 py-6 text-[12px] text-paper/60">
             <Wordmark className="text-paper" />
-            <span>7 packages · 3 apps · 339 tests</span>
+            <SiteFooter tone="dark" />
             <a href="#top" className="hover:text-paper">Back to top ↑</a>
           </footer>
         </div>

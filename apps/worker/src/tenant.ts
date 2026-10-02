@@ -23,7 +23,10 @@ import {
   GitHubProvider,
   NotionProvider,
   ResendProvider,
+  SentryProvider,
   SlackProvider,
+  UnavailableMetrics,
+  type AlertSource,
   type EmailProvider,
   type GitHubAppClient,
   type KnowledgeProvider,
@@ -61,7 +64,10 @@ export interface Tenant {
   service: ServiceRow;
   repository: RepositoryRow;
   installation: GitHubInstallationRow;
+  /** Metrics and logs: Datadog when connected, otherwise readings are unknown. */
   observability: ObservabilityProvider;
+  /** Where this service's incidents are noticed: its configured alert source. */
+  alerts: AlertSource;
   sourceControl: SourceControlProvider;
   messaging: MessagingProvider;
   knowledge: KnowledgeProvider | null;
@@ -95,15 +101,26 @@ export async function tenantFor(op: OperatorServices, serviceId: string): Promis
 
   const integrations = new IntegrationRepository(op.db);
   const datadog = await integrations.get(org, 'datadog');
-  const [ddApi, ddApp, slackToken, notionToken, resendKey, anthropicKey] = await Promise.all([
+  const sentry = await integrations.get(org, 'sentry');
+  const [ddApi, ddApp, slackToken, notionToken, resendKey, anthropicKey, sentryToken] = await Promise.all([
     op.vault.reveal(org, 'datadog.api_key'),
     op.vault.reveal(org, 'datadog.app_key'),
     op.vault.reveal(org, 'slack.bot_token'),
     op.vault.reveal(org, 'notion.token'),
     op.vault.reveal(org, 'resend.api_key'),
     op.vault.reveal(org, 'anthropic.api_key'),
+    op.vault.reveal(org, 'sentry.auth_token'),
   ]);
-  if (!datadog?.baseUrl || !ddApi || !ddApp) throw new TenantUnavailable('Datadog is not connected');
+  const datadogProvider = datadog?.baseUrl && ddApi && ddApp ? new DatadogProvider({ baseUrl: datadog.baseUrl, apiKey: ddApi, appKey: ddApp }) : null;
+  let alerts: AlertSource;
+  if (service.alertSource === 'sentry') {
+    const organization = typeof sentry?.config.organization === 'string' ? sentry.config.organization : null;
+    if (!sentry?.baseUrl || !organization || !sentryToken) throw new TenantUnavailable('Sentry is not connected');
+    alerts = new SentryProvider({ baseUrl: sentry.baseUrl, token: sentryToken, organization, ...(op.now ? { now: op.now } : {}) });
+  } else {
+    if (!datadogProvider) throw new TenantUnavailable('Datadog is not connected');
+    alerts = datadogProvider;
+  }
   if (!slackToken) throw new TenantUnavailable('Slack is not connected');
   if (!service.slackChannelId) throw new TenantUnavailable('the service has no Slack channel');
 
@@ -137,7 +154,8 @@ export async function tenantFor(op: OperatorServices, serviceId: string): Promis
     service,
     repository,
     installation,
-    observability: new DatadogProvider({ baseUrl: datadog.baseUrl, apiKey: ddApi, appKey: ddApp }),
+    observability: datadogProvider ?? new UnavailableMetrics('datadog'),
+    alerts,
     sourceControl,
     messaging: new SlackProvider({ baseUrl: op.slackBaseUrl, token: slackToken }),
     knowledge,

@@ -1,3 +1,8 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   GitHubAppTokenSource,
@@ -16,6 +21,8 @@ import { INC_001 } from '../src/fixtures/index.js';
  * that talks to Arga and to the real vendors. A twin tested through a bespoke client
  * would prove nothing about the code that actually ships.
  */
+
+const run = promisify(execFile);
 
 let server: LocalTwinServer;
 let endpoints: { github: string; datadog: string; slack: string };
@@ -61,6 +68,37 @@ describe('local GitHub twin', () => {
     const token = await tokens.token();
     expect(token).toMatch(/^ghs_/);
     expect(tokens.grantedPermissions).toMatchObject({ contents: 'write', pull_requests: 'write' });
+  });
+
+  it('serves a shallow, blob-filtered git clone of a pinned sha, authenticated only through the environment', async () => {
+    const gh = await github();
+    const sha = server.current.repositories.get('acme/checkout-api')!.branches.get('main')!;
+    const dir = mkdtempSync(join(tmpdir(), 'twin-clone-'));
+    try {
+      const env = { ...process.env, ...(await gh.gitAuthEnvironment()) };
+      // Asynchronous: the twin answers from this same process.
+      const git = async (...args: string[]) => (await run('git', args, { cwd: dir, env, timeout: 30_000 })).stdout;
+      await git('init', '-q');
+      await git('remote', 'add', 'origin', gh.cloneUrl('acme/checkout-api'));
+      await git('fetch', '-q', '--depth', '1', '--filter=blob:none', 'origin', sha);
+      await git('checkout', '-q', 'FETCH_HEAD');
+      expect((await git('rev-parse', 'HEAD')).trim()).toBe(sha);
+      const twinFiles = server.current.repositories.get('acme/checkout-api')!.commits.find((c) => c.sha === sha)!.files;
+      for (const [path, content] of twinFiles) expect(readFileSync(join(dir, path), 'utf8')).toBe(content);
+      expect((await git('cat-file', '-t', `${sha}^{tree}`)).trim()).toBe('tree');
+      // The credential is not written anywhere on disk.
+      expect(readFileSync(join(dir, '.git', 'config'), 'utf8')).not.toMatch(/ghs_|x-access-token|Authorization/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a git fetch without a valid installation token', async () => {
+    const gh = await github();
+    const url = gh.cloneUrl('acme/checkout-api');
+    const bad = await fetch(`${url}/info/refs?service=git-upload-pack`, { headers: { authorization: `Basic ${Buffer.from('x-access-token:ghs_nope').toString('base64')}` } });
+    expect(bad.status).toBe(401);
+    expect((await fetch(`${url}/info/refs?service=git-upload-pack`)).status).toBe(401);
   });
 
   it('rejects unauthenticated reads of commits', async () => {

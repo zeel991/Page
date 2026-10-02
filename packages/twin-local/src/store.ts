@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { blobObject } from './git-objects.js';
 
 /**
  * In-memory state for the local twins.
@@ -196,6 +196,29 @@ export interface TwinState {
    * The Slack workspace the twin plays, the app it accepts OAuth from, and the bot
    * tokens and codes it has issued.
    */
+  /**
+   * Sentry. Its issues and events are derived from `logs` — the same error logs the
+   * Datadog twin serves — so one scenario can be triggered through either backend.
+   */
+  /** Dodo Payments: the operator's products and keys, and what customers bought. */
+  dodo: {
+    businessId: string;
+    apiKeys: Set<string>;
+    /** Standard Webhooks secret, `whsec_` + base64. */
+    webhookSecret: string;
+    products: Map<string, { productId: string; name: string; priceCents: number; currency: string }>;
+    checkouts: Map<string, { sessionId: string; productId: string; email: string | null; returnUrl: string | null; metadata: Record<string, string> }>;
+    subscriptions: Map<string, TwinDodoSubscription>;
+    /** Where the hosted checkout and portal pages deliver webhooks, when set. */
+    webhookUrl?: string;
+  };
+  sentry: {
+    organization: string;
+    /** Per-token requests allowed per window before 429 + Retry-After. */
+    rateLimit: { max: number; windowMs: number };
+    /** Page sizes, small enough that pagination is exercised. */
+    pageSize: { issues: number; events: number };
+  };
   slack: {
     team: { id: string; name: string };
     app: { clientId: string; clientSecret: string };
@@ -206,23 +229,9 @@ export interface TwinState {
 }
 
 /** Content-addressed sha, so the same seed always produces the same history. */
-export function commitSha(
-  message: string,
-  parents: string[],
-  files: Map<string, string>,
-): string {
-  const hash = createHash('sha1');
-  hash.update(message);
-  hash.update(parents.join(','));
-  for (const path of [...files.keys()].sort()) {
-    hash.update(path);
-    hash.update(files.get(path) ?? '');
-  }
-  return hash.digest('hex');
-}
-
+/** Git's blob id for a file's content. */
 export function blobSha(content: string): string {
-  return createHash('sha1').update(`blob ${content.length}\0${content}`).digest('hex');
+  return blobObject(content).sha;
 }
 
 export interface ChangedFileRecord {
@@ -306,6 +315,24 @@ function unifiedPatch(path: string, before: string, after: string): string {
   return lines.join('\n');
 }
 
+export interface TwinDodoSubscription {
+  subscriptionId: string;
+  customerId: string;
+  email: string;
+  productId: string;
+  status: string;
+  metadata: Record<string, string>;
+  createdAt: string;
+  nextBillingDate: string;
+  cancelAtNextBillingDate: boolean;
+}
+
+export const TWIN_DODO = {
+  apiKey: 'dodo_test_twin_key',
+  webhookSecret: `whsec_${Buffer.from('pager-twin-dodo-webhook-key-0123').toString('base64')}`,
+  teamProduct: 'pdt_twin_team',
+} as const;
+
 export function emptyState(): TwinState {
   return {
     repositories: new Map(),
@@ -328,6 +355,15 @@ export function emptyState(): TwinState {
     blobs: new Map(),
     trees: new Map(),
     emails: [],
+    dodo: {
+      businessId: 'bus_twin',
+      apiKeys: new Set([TWIN_DODO.apiKey]),
+      webhookSecret: TWIN_DODO.webhookSecret,
+      products: new Map([[TWIN_DODO.teamProduct, { productId: TWIN_DODO.teamProduct, name: 'Team', priceCents: 4900, currency: 'USD' }]]),
+      checkouts: new Map(),
+      subscriptions: new Map(),
+    },
+    sentry: { organization: 'acme', rateLimit: { max: 1000, windowMs: 1000 }, pageSize: { issues: 10, events: 25 } },
     slack: {
       team: { id: 'T0TWIN', name: 'Acme' },
       app: { clientId: 'twin-slack-client', clientSecret: 'twin-slack-secret' },
@@ -370,6 +406,16 @@ export function cloneState(state: TwinState): TwinState {
     emails: state.emails.map((e) => ({ ...e, to: [...e.to] })),
     ...(state.limits ? { limits: { ...state.limits } } : {}),
     ...(state.databases ? { databases: state.databases.map((d) => ({ ...d })) } : {}),
+    dodo: {
+      businessId: state.dodo.businessId,
+      apiKeys: new Set(state.dodo.apiKeys),
+      webhookSecret: state.dodo.webhookSecret,
+      products: new Map([...state.dodo.products].map(([k, v]) => [k, { ...v }])),
+      checkouts: new Map([...state.dodo.checkouts].map(([k, v]) => [k, { ...v, metadata: { ...v.metadata } }])),
+      subscriptions: new Map([...state.dodo.subscriptions].map(([k, v]) => [k, { ...v, metadata: { ...v.metadata } }])),
+      ...(state.dodo.webhookUrl ? { webhookUrl: state.dodo.webhookUrl } : {}),
+    },
+    sentry: { organization: state.sentry.organization, rateLimit: { ...state.sentry.rateLimit }, pageSize: { ...state.sentry.pageSize } },
     slack: {
       team: { ...state.slack.team },
       app: { ...state.slack.app },

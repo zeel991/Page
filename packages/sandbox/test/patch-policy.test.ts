@@ -51,11 +51,7 @@ describe('Sandbox.writePatch', () => {
   it('refuses the whole patch before writing any of it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pager-policy-'));
     try {
-      const provider = {
-        listFiles: async () => ({ paths: ['src/a.ts', 'test/a.test.ts'], truncated: false }),
-        getFile: async (_r: string, _s: string, path: string) => `// ${path}`,
-      };
-      const sandbox = await Sandbox.create(provider as never, 'a/b', 'sha', { rootDir: root });
+      const sandbox = await Sandbox.fromFiles({ 'src/a.ts': '// src/a.ts', 'test/a.test.ts': '// test/a.test.ts' }, 'sha', { rootDir: root });
       await expect(
         sandbox.writePatch([
           { path: 'src/a.ts', content: 'patched' },

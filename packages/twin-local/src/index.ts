@@ -6,3 +6,6 @@ export * from './fixtures/index.js';
 export * from './tracker-routes.js';
 export * from './email-routes.js';
 export * from './demo-loader.js';
+export * from './git-objects.js';
+export * from './sentry-routes.js';
+export * from './dodo-routes.js';

@@ -83,7 +83,7 @@ describe('CommunicationAgent evidence gate', () => {
 
   const evidence: Evidence[] = [
     {
-      id: 'ev-1', incidentId: 'INC-184', kind: 'DATADOG_LOG', provenance: 'OBSERVED',
+      id: 'ev-1', incidentId: 'INC-184', kind: 'OBS_LOG', provenance: 'OBSERVED',
       summary: 'stack trace', sourceToolCallId: 'tc-1', collectedAt: new Date(), payload: {},
     },
     {

@@ -1,1 +1,6 @@
-reports/
+reports/*
+# Benchmark reports are the source of the published numbers; they are kept.
+!reports/benchmark-*.json
+# Partial runs (--subset, --only) are not published.
+reports/benchmark-*-subset-*.json
+reports/benchmark-*-partial.json

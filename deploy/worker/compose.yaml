@@ -1,0 +1,57 @@
+# The worker on a host with Docker: a VM you own (any Linux with Docker Engine).
+#
+#   cd deploy/worker
+#   cp worker.env.example worker.env        # fill in; never commit it
+#   sudo install -d -o 10001 -g 10001 /var/lib/pager/sandboxes /var/lib/pager/cache
+#   DOCKER_GID=$(getent group docker | cut -d: -f3) WORKER_DOMAIN=worker.example.com docker compose up -d --build
+#
+# Why the paths are identical inside and out: the worker asks the host's daemon to
+# bind-mount each sandbox, and the daemon resolves that path on the host.
+name: pager
+
+services:
+  # Built only, so the worker can start containers from it.
+  sandbox-image:
+    build:
+      context: ../..
+      dockerfile: docker/sandbox.Dockerfile
+    image: pager-sandbox:latest
+    entrypoint: ["true"]
+    restart: "no"
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: docker/worker.Dockerfile
+    image: pager-worker:latest
+    depends_on:
+      sandbox-image:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    env_file: worker.env
+    environment:
+      PAGER_SANDBOX_RUNNER: docker
+      PAGER_SANDBOX_IMAGE: pager-sandbox:latest
+      PAGER_SANDBOX_ROOT: /var/lib/pager/sandboxes
+      PAGER_DEPENDENCY_CACHE: /var/lib/pager/cache
+      PORT: "10000"
+    # The daemon's socket is root-equivalent on this host. Only the worker holds it;
+    # repository code runs in the sibling containers it starts, which do not.
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the host's docker group id}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/pager:/var/lib/pager
+
+  # TLS in front of the worker, for Slack's merge clicks (/slack/interactions).
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [worker]
+    ports: ["80:80", "443:443"]
+    command: caddy reverse-proxy --from ${WORKER_DOMAIN:?set WORKER_DOMAIN to this host's public name} --to worker:10000
+    volumes:
+      - caddy-data:/data
+
+volumes:
+  caddy-data: {}

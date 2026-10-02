@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version is read from package.json's packageManager field.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # The Python demo and benchmark repository run pytest in a virtualenv.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pnpm install --frozen-lockfile
+
+      # Typecheck, lint, build the packages, test, build the apps.
+      - run: pnpm verify
+
+      # The deterministic eval subset: one bug per benchmark repository and one
+      # negative control of each kind, scripted, failing the build on a wrong outcome.
+      # The full benchmark and anything with a live model are run by hand.
+      - name: Benchmark (deterministic subset)
+        run: pnpm bench --subset ci --repeat 1 --gate
+
+      - name: End-to-end demos (Datadog and Sentry, against twins)
+        run: pnpm demo:e2e
+
+  # The production sandbox against a real Docker daemon, which GitHub's runners have
+  # and a development laptop may not: the isolation properties themselves, then every
+  # demo repository from alert to pull request with its code running in containers.
+  sandbox-docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r --filter './packages/**' build
+
+      - name: Build the sandbox image
+        run: docker build -f docker/sandbox.Dockerfile -t pager-sandbox:ci .
+
+      - name: Build the worker image
+        run: docker build -f docker/worker.Dockerfile -t pager-worker:ci .
+
+      - name: Isolation, enforced by the daemon
+        run: npx vitest run packages/sandbox/test/docker.integration.test.ts
+        env:
+          PAGER_TEST_DOCKER_IMAGE: pager-sandbox:ci
+
+      - name: End-to-end demos, repository code in containers
+        run: pnpm demo:e2e
+        env:
+          PAGER_SANDBOX_RUNNER: docker
+          PAGER_SANDBOX_IMAGE: pager-sandbox:ci

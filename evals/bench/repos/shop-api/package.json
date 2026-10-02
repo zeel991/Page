@@ -1,0 +1,17 @@
+{
+  "name": "shop-api",
+  "version": "1.8.0",
+  "private": true,
+  "type": "module",
+  "description": "Benchmark base repository: an express service with real dependencies, tested with vitest.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "express": "4.21.2"
+  },
+  "devDependencies": {
+    "supertest": "7.0.0",
+    "vitest": "2.1.9"
+  }
+}

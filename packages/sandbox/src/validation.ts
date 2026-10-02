@@ -64,11 +64,22 @@ export function parseTestCounts(output: string): { passed: number | null; failed
     return { passed: Number(jest[2]), failed: jest[1] ? Number(jest[1]) : 0 };
   }
 
+  // pytest: "===== 1 failed, 3 passed in 0.05s =====" (either count may be absent).
+  const pytest = /^=+ (.*\bin [\d.]+s(?: \([\d:.]+\))?) =+\s*$/m.exec(output);
+  if (pytest && /\b(passed|failed)\b/.test(pytest[1]!)) {
+    const n = (word: string) => Number(new RegExp(`(\\d+) ${word}`).exec(pytest[1]!)?.[1] ?? 0);
+    return { passed: n('passed'), failed: n('failed') + n('error') };
+  }
+
   return { passed: null, failed: null };
 }
 
+/** Terminal escape sequences, which a runner may emit whatever it is asked. */
+// eslint-disable-next-line no-control-regex -- matching the ESC character is the point.
+const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+
 function toRun(kind: ValidationKind, result: CommandResult): ValidationRun {
-  const output = `${result.stdout}\n${result.stderr}`.trim();
+  const output = `${result.stdout}\n${result.stderr}`.replace(ANSI, '').trim();
   const counts = kind === 'test' || kind === 'reproduction'
     ? parseTestCounts(output)
     : { passed: null, failed: null };

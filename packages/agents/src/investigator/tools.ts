@@ -106,7 +106,7 @@ function def(name: string, description: string): ToolDefinition {
 
 const TOOLS: InvestigationTool[] = [
   {
-    definition: def('datadog.queryLogs', 'Read production logs for the service in a window.'),
+    definition: def('observability.queryLogs', 'Read production logs for the service in a window.'),
     spec: {
       name: 'read_logs',
       description:
@@ -126,7 +126,7 @@ const TOOLS: InvestigationTool[] = [
     async run(ctx, args, target, providers) {
       const range = args.window === 'baseline' ? target.baselineWindow : target.observationWindow;
       const { value } = await ctx.tool(
-        'datadog.queryLogs',
+        'observability.queryLogs',
         { service: target.service, window: args.window, level: args.level },
         () =>
           providers.observability.queryLogs(target.service, range, {
@@ -154,7 +154,7 @@ const TOOLS: InvestigationTool[] = [
     },
   },
   {
-    definition: def('datadog.queryMetric', 'Read a metric series for the service in a window.'),
+    definition: def('observability.queryMetric', 'Read a metric series for the service in a window.'),
     spec: {
       name: 'read_metric',
       description:
@@ -173,7 +173,7 @@ const TOOLS: InvestigationTool[] = [
     async run(ctx, args, target, providers) {
       const range = args.window === 'baseline' ? target.baselineWindow : target.observationWindow;
       const { value } = await ctx.tool(
-        'datadog.queryMetric',
+        'observability.queryMetric',
         { service: target.service, metric: args.metric, window: args.window },
         () => providers.observability.queryMetric(target.service, args.metric as MetricName, range),
       );

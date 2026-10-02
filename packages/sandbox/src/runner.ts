@@ -16,8 +16,9 @@ import { redactSecrets } from '@pager/core';
  *    what runs when nothing else is configured, and it says so.
  *  - `DockerRunner` — a container with no network (unless a step asks for it, as a
  *    dependency install does), a read-only root filesystem, CPU, memory and pid
- *    limits, a non-root uid, all capabilities dropped, and the repository mounted
- *    at `/work`. This is the production boundary.
+ *    limits, a non-root uid, all capabilities dropped, and only this sandbox's own
+ *    directories mounted: the repository at `/work`, its home and its temp. This is
+ *    the production boundary.
  */
 
 export interface CommandResult {
@@ -50,6 +51,11 @@ export interface SandboxRunner {
   readonly kind: 'local-process' | 'docker';
   /** One line for logs and the dashboard: what isolation this actually provides. */
   readonly description: string;
+  /**
+   * What makes two installs by this runner interchangeable, beyond its kind: a tree
+   * installed in one image is not the tree another image would have produced.
+   */
+  readonly cacheScope?: string;
   run(spec: RunSpec): Promise<CommandResult>;
 }
 
@@ -72,6 +78,14 @@ export function sandboxEnvironment(opts: {
     HOME: opts.home,
     TMPDIR: opts.tmp,
     CI: '1',
+    // CI=1 turns colour ON in several runners (vitest's among them); escape codes in
+    // the output would defeat every pattern that reads it.
+    NO_COLOR: '1',
+    FORCE_COLOR: '0',
+    // Python validates cached bytecode by source size and mtime (whole seconds), so a
+    // patch the same length as the line it replaces, written within the second, ran
+    // the old code. No cache is written, so the code that runs is the code on disk.
+    PYTHONDONTWRITEBYTECODE: '1',
     NODE_ENV: 'test',
     ...(opts.extra ?? {}),
   };
@@ -186,6 +200,17 @@ export function runProcess(
   });
 }
 
+/**
+ * PATH for a command in the repository: its own `node_modules/.bin` first, as `npm
+ * run` would, and no other project's. A host PATH inherited through a package
+ * manager carries that project's `.bin` directories, and without this the
+ * repository's `vitest` resolved to whichever vitest the host happened to have.
+ */
+export function repositoryPath(workDir: string, hostPath: string | undefined, sep = ':'): string {
+  const host = (hostPath ?? '/usr/local/bin:/usr/bin:/bin').split(sep).filter((p) => p && !/[\\/]node_modules[\\/]\.bin[\\/]?$/.test(p));
+  return [`${workDir}/node_modules/.bin`, ...host].join(sep);
+}
+
 /** Development only: runs on this host, as this user, with this host's network. */
 export class LocalProcessRunner implements SandboxRunner {
   readonly kind = 'local-process' as const;
@@ -198,7 +223,7 @@ export class LocalProcessRunner implements SandboxRunner {
   run(spec: RunSpec): Promise<CommandResult> {
     return runProcess(this.spawnImpl, spec.command, spec.args, {
       cwd: spec.workDir,
-      env: sandboxEnvironment({ path: process.env.PATH, home: spec.homeDir, tmp: spec.tmpDir, extra: spec.env }),
+      env: sandboxEnvironment({ path: repositoryPath(spec.workDir, process.env.PATH), home: spec.homeDir, tmp: spec.tmpDir, extra: spec.env }),
       timeoutMs: spec.timeoutMs,
       maxOutputBytes: spec.maxOutputBytes,
     });
@@ -206,16 +231,37 @@ export class LocalProcessRunner implements SandboxRunner {
 }
 
 export interface DockerRunnerOptions {
-  /** Image with the language toolchain, e.g. `node:22-bookworm-slim`. */
+  /** Image with the language toolchains: `docker/sandbox.Dockerfile`. */
   image: string;
-  /** Defaults: 2 CPUs, 2 GiB, 512 pids, uid 10001, 512 MiB of /tmp. */
+  /** Defaults: 2 CPUs, 2 GiB, 512 pids. */
   cpus?: number;
   memoryMb?: number;
   pids?: number;
+  /**
+   * `uid:gid` inside the container. Defaults to this process's own, so the
+   * bind-mounted sandbox is writable and nothing it writes is owned by anyone else.
+   */
   user?: string;
-  tmpfsMb?: number;
+  /** An OCI runtime, e.g. `runsc` (gVisor), for a kernel boundary as well. */
+  runtime?: string;
   /** The docker CLI. */
   dockerBin?: string;
+}
+
+/**
+ * This process's `uid:gid`, which the container runs as.
+ *
+ * Refused when it is root: a container running as uid 0 is root on the host's
+ * files it mounts, and a worker running as root has no reason to.
+ */
+export function containerUser(ids: { uid: number | undefined; gid: number | undefined } = { uid: process.getuid?.(), gid: process.getgid?.() }): string {
+  if (ids.uid === undefined || ids.gid === undefined) {
+    throw new Error('DockerRunner needs a uid:gid to run as: pass `user`, or run on a platform with process.getuid().');
+  }
+  if (ids.uid === 0) {
+    throw new Error('DockerRunner will not run repository code as root. Run the worker as an unprivileged user in the docker group, or pass `user`.');
+  }
+  return `${ids.uid}:${ids.gid}`;
 }
 
 /**
@@ -225,7 +271,7 @@ export interface DockerRunnerOptions {
  */
 export function dockerRunArgs(spec: RunSpec, opts: DockerRunnerOptions, containerName: string): string[] {
   const env = sandboxEnvironment({
-    path: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    path: '/work/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     home: '/home/sandbox',
     tmp: '/tmp',
     extra: spec.env,
@@ -234,18 +280,24 @@ export function dockerRunArgs(spec: RunSpec, opts: DockerRunnerOptions, containe
     'run',
     '--rm',
     '--name', containerName,
+    // An init as pid 1, so signals reach the command and its children are reaped.
+    '--init',
+    ...(opts.runtime ? ['--runtime', opts.runtime] : []),
     '--network', spec.network ? 'bridge' : 'none',
     '--read-only',
-    '--tmpfs', `/tmp:rw,nosuid,nodev,size=${opts.tmpfsMb ?? 512}m`,
-    '--tmpfs', `/home/sandbox:rw,nosuid,nodev,size=64m`,
     '--cpus', String(opts.cpus ?? 2),
     '--memory', `${opts.memoryMb ?? 2048}m`,
     '--memory-swap', `${opts.memoryMb ?? 2048}m`,
     '--pids-limit', String(opts.pids ?? 512),
-    '--user', opts.user ?? '10001:10001',
+    '--user', opts.user ?? containerUser(),
     '--cap-drop', 'ALL',
     '--security-opt', 'no-new-privileges',
+    // Home and temp are the sandbox's own directories on disk, not tmpfs: a package
+    // manager's cache (npm's, pnpm's store, uv's) does not fit in memory-backed
+    // space sized for scratch files, and tmpfs counts against the memory limit.
     '--mount', `type=bind,source=${spec.workDir},target=/work`,
+    '--mount', `type=bind,source=${spec.homeDir},target=/home/sandbox`,
+    '--mount', `type=bind,source=${spec.tmpDir},target=/tmp`,
     '--workdir', '/work',
     ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]),
     opts.image,
@@ -257,21 +309,29 @@ export function dockerRunArgs(spec: RunSpec, opts: DockerRunnerOptions, containe
 /**
  * Runs each command in a fresh container.
  *
- * Requires a Docker daemon that can bind-mount the sandbox directory (a local
- * daemon, or a remote one sharing the filesystem). On timeout the container itself
- * is killed, since killing the `docker` client does not stop it.
+ * Requires a Docker daemon that can bind-mount the sandbox directory at the same
+ * path this process sees it: a local daemon, or, when the worker itself runs in a
+ * container with the daemon's socket, a sandbox root mounted at an identical path in
+ * both. On timeout the container itself is killed, since killing the `docker` client
+ * does not stop it.
  */
 export class DockerRunner implements SandboxRunner {
   readonly kind = 'docker' as const;
   readonly description: string;
+  readonly cacheScope: string;
+  private readonly opts: DockerRunnerOptions;
 
   constructor(
-    private readonly opts: DockerRunnerOptions,
+    opts: DockerRunnerOptions,
     private readonly spawnImpl: Spawn = spawn,
   ) {
+    // Resolved once, so a worker running as root fails at boot, not at the first incident.
+    this.opts = { ...opts, user: opts.user ?? containerUser() };
+    this.cacheScope = `docker:${opts.image}`;
     this.description =
-      `DockerRunner (${opts.image}): no network outside dependency install, read-only root, ` +
-      `non-root uid, CPU/memory/pid limits, repository at /work.`;
+      `DockerRunner (${opts.image}${opts.runtime ? `, runtime ${opts.runtime}` : ''}): no network outside ` +
+      `dependency install, read-only root, uid ${this.opts.user}, no capabilities, CPU/memory/pid limits, ` +
+      `only the sandbox's own directories mounted.`;
   }
 
   run(spec: RunSpec): Promise<CommandResult> {

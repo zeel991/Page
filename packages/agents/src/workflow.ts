@@ -7,6 +7,7 @@ import type {
   MetricName,
   KnowledgeProvider,
   MessagingProvider,
+  AlertSource,
   ObservabilityProvider,
   PullRequest,
   SourceControlProvider,
@@ -19,15 +20,22 @@ import {
   ValidationEngine,
   describeAssertionEvidence,
   describeReproduction,
+  establishBaseline,
+  excludedFromGate,
+  installDependencies,
+  onlyExcludedFailures,
   profileRepository,
   singleTestCommand,
   testCountRegression,
+  type DependencyCache,
+  type InstallResult,
   type ReproductionAttempt,
   type SandboxRunner,
+  type SuiteBaseline,
   type ValidationRun,
 } from '@pager/sandbox';
 import { ProductionWatcher, describeAlert, type ProductionAlert } from './production-watcher.js';
-import { firstSentences, toRepositoryPath } from './log-analysis.js';
+import { clusterErrors, clustersFromGroups, failureKey, firstSentences, locateInRepository, toRepositoryPath } from './log-analysis.js';
 import {
   NoPatchGenerator,
   type PatchContext,
@@ -119,7 +127,13 @@ export interface WorkflowPersistence {
 }
 
 export interface WorkflowDeps {
+  /** Metrics and logs. */
   observability: ObservabilityProvider;
+  /**
+   * Where incidents are noticed. Defaults to `observability` when it is itself an
+   * alert source (Datadog is); Sentry is one without being a metrics backend.
+   */
+  alerts?: AlertSource;
   sourceControl: SourceControlProvider;
   messaging: MessagingProvider;
   issueTracker: IssueTrackerProvider | null;
@@ -140,6 +154,8 @@ export interface WorkflowDeps {
    * `LocalProcessRunner`, which is for development only.
    */
   sandboxRunner?: SandboxRunner;
+  /** Installed dependency trees, kept between sandboxes by lockfile hash. */
+  dependencyCache?: DependencyCache | null;
   /**
    * The clock.
    *
@@ -184,6 +200,11 @@ function writeTool(name: string, description: string): ToolDefinition {
 }
 
 export interface WorkflowInput {
+  /**
+   * Which of the alert's distinct failures this run is about (`DetectedFailure.key`).
+   * Absent: the loudest novel one. Each novel failure is its own incident.
+   */
+  failureKey?: string;
   service: string;
   repository: string;
   /** Branch pull requests target. NOT the source of the sandbox revision. */
@@ -294,6 +315,34 @@ export function resolveDeployedRevision(input: WorkflowInput): DeployedRevision 
   return null;
 }
 
+/** A test file, by the conventions of the common runners (node:test, vitest, jest, mocha, pytest). */
+export function isTestFile(path: string): boolean {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(name)) return true;
+  if (/^test_.+\.py$/.test(name) || /_test\.py$/.test(name)) return true;
+  return /(^|\/)(test|tests|__tests__)\//.test(path) && /\.([cm]?[jt]sx?|py)$/.test(name) && !/(^|\/)(fixtures?|helpers?)\//.test(path);
+}
+
+/** A suffix for the baseline step: what was set aside, if anything. */
+function describeBaseline(b: SuiteBaseline): string {
+  if (b.passed || b.runs.some((r) => r.skipped)) return '';
+  if (!b.known) return ' — red, and its failures could not all be named, so none can be set aside.';
+  return ` — ${b.failing.length} test(s) already failing and ${b.flaky.length} flaky across ${b.runs.length} runs; set aside by name.`;
+}
+
+/** The pull request's statement of which tests the gate did not hold this patch to. */
+export function excludedSection(b: SuiteBaseline | null): string {
+  if (!b || b.passed || !b.known || b.failing.length + b.flaky.length === 0) return '';
+  const list = (names: string[]) => names.map((n) => `  - \`${n}\``).join('\n');
+  return (
+    `**Excluded from the gate.** The suite was run ${b.runs.length} times at the deployed revision before anything was changed. ` +
+    `These tests were not held against this patch, because they did not pass there:\n` +
+    (b.failing.length ? `- Already failing in every run:\n${list(b.failing)}\n` : '') +
+    (b.flaky.length ? `- Flaky (failed in some runs, not others):\n${list(b.flaky)}\n` : '') +
+    `\n`
+  );
+}
+
 /** The readable half of an unknown thrown value. */
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -323,6 +372,10 @@ export interface WorkflowResult {
   regressionTest: RegressionTestProposal | null;
   /** Checks run before the regression test existed, to rule out a broken suite. */
   preexistingChecks: ValidationRun | null;
+  /** The suite at the deployed revision, run twice: what was already failing, and what is flaky. */
+  suiteBaseline: SuiteBaseline | null;
+  /** How the repository's dependencies were installed, or why they were not. */
+  dependencies: InstallResult | null;
   /** True when a bounded repair retry was used. */
   repairAttempted: boolean;
   /** What the post-merge evidence supported. Null before recovery is checked. */
@@ -365,6 +418,8 @@ export class IncidentWorkflow {
       deployedRevision: null,
       regressionTest: null,
       preexistingChecks: null,
+      suiteBaseline: null,
+      dependencies: null,
       repairAttempted: false,
       recoveryVerdict: null,
       slackThreadTs: null,
@@ -435,8 +490,8 @@ export class IncidentWorkflow {
       return result;
     };
 
-    // ── 1. Datadog is watching ───────────────────────────────────────────────
-    const watcher = new ProductionWatcher(this.deps.observability, this.deps.knowledge);
+    // ── 1. Production is being watched ───────────────────────────────────────────────
+    const watcher = new ProductionWatcher(this.alertSource(), this.deps.knowledge);
     const preIncidentRuns: string[] = [];
     const alert = await this.deps.tracer.run('ProductionWatcher', { input: { service: input.service } }, (ctx) => {
       // Detection happens before an incident exists, so this run is linked to it
@@ -450,6 +505,22 @@ export class IncidentWorkflow {
       step('watching', `No monitor alerting for ${input.service}. Production looks healthy.`);
       return result;
     }
+    if (input.failureKey) {
+      const failure = alert.failures.find((f) => f.key === input.failureKey);
+      if (!failure || !failure.novelty.novel) {
+        result.stage = 'not_escalated';
+        steps.push({
+          stage: 'not_escalated',
+          at: new Date(),
+          summary: failure
+            ? `The failure at ${input.failureKey} is documented: ${failure.novelty.reason}`
+            : `The failure at ${input.failureKey} is no longer among the errors ${input.service} is producing.`,
+        });
+        return result;
+      }
+      alert.primary = failure.cluster;
+      alert.novelty = failure.novelty;
+    }
     if (!alert.escalate) {
       // Not every alert is an incident, and saying so is the point.
       result.stage = 'not_escalated';
@@ -458,6 +529,24 @@ export class IncidentWorkflow {
     }
 
     // ── 2. Identify ──────────────────────────────────────────────────────────
+    // Frames name the runtime's absolute paths. Which part is the repository is
+    // read off the repository's own files at the deployed revision, not guessed
+    // from a list of hosting platforms.
+    const pinned = resolveDeployedRevision(input);
+    if (pinned && alert.primary) {
+      try {
+        const listing = await trace('RepositoryInvestigator', async (ctx) =>
+          (await ctx.tool('github.listFiles', { repo: input.repository, ref: pinned.sha }, () =>
+            this.deps.sourceControl.listFiles(input.repository, pinned.sha),
+          )).value,
+        );
+        const primarySignature = alert.primary.signature;
+        alert.clusters = alert.clusters.map((c) => locateInRepository(c, listing));
+        alert.primary = alert.clusters.find((c) => c.signature === primarySignature) ?? locateInRepository(alert.primary, listing);
+      } catch (err) {
+        step('identified', `Could not list ${input.repository} at ${pinned.sha.slice(0, 12)} to locate frames: ${message(err)}`);
+      }
+    }
     const cluster = alert.primary!;
     const frame = cluster.topApplicationFrame;
     step('identified', describeAlert(alert), {
@@ -711,6 +800,18 @@ export class IncidentWorkflow {
       return await halt(`No diagnosis was reached: ${why} No pull request was opened.`);
     }
 
+    // ── 4c. Did this deployment cause it at all? ─────────────────────────────
+    //
+    // A failure already happening before the deployment was not introduced by it.
+    // Repairing it as this deployment's regression would blame a deploy for a bug it
+    // did not ship. Checked from the errors themselves, in application code, whether
+    // or not a model is investigating.
+    const predates = await this.failurePredatesDeployment(trace, alert, input, revision.sha);
+    if (predates) {
+      await this.reportHandoff(comms, thread, predates, result.issue);
+      return await halt(predates);
+    }
+
     // ── 4c. Is production even running what the branch says? ─────────────────
     //
     // The sandbox is built from the DEPLOYED revision, because that is the only
@@ -725,7 +826,24 @@ export class IncidentWorkflow {
     // production ran the revision before it. The next incident re-diagnosed the
     // same defect and opened a conflicting pull request against code that was
     // already correct.
-    const baseBranch = input.baseBranch ?? 'main';
+    // The branch fixes go to: the service's configured base, else the repository's
+    // own default branch — read from the repository, never assumed to be `main`.
+    let baseBranch: string;
+    try {
+      baseBranch =
+        input.baseBranch ??
+        (await trace('RepositoryInvestigator', async (ctx) =>
+          (await ctx.tool('github.getRepository', { repo: input.repository }, () =>
+            this.deps.sourceControl.getDefaultBranch(input.repository),
+          )).value,
+        ));
+    } catch (err) {
+      return await halt(
+        `Could not read the default branch of ${input.repository}, and the service names no base branch: ${
+          err instanceof Error ? err.message : String(err)
+        }. A fix cannot be proposed without knowing which branch it would merge into.`,
+      );
+    }
     let deploymentLag: string | null = null;
     try {
       const baseHead = await trace('RepositoryInvestigator', async (ctx) => {
@@ -760,14 +878,32 @@ export class IncidentWorkflow {
 
     try {
       const profile = await profileRepository(sandbox);
+
+      // Dependencies, from the lockfile only, before any check runs: a suite run
+      // without them fails on imports, which says nothing about the incident.
+      const installed = await installDependencies(sandbox, profile, { cache: this.deps.dependencyCache ?? null });
+      result.dependencies = installed;
+      step('reproducing', `Dependencies: ${installed.status} — ${installed.detail}`);
+      if (installed.status === 'failed' || installed.status === 'unpinned') {
+        return await halt(
+          `The repository's dependencies could not be installed (${installed.status}): ${installed.detail} ` +
+            `Its tests cannot be run meaningfully without them, so nothing was reproduced.`,
+        );
+      }
+
       const validation = new ValidationEngine(sandbox);
       const reproduction = new ReproductionAgent(sandbox, validation);
 
-      // The repository's own checks, BEFORE anything is added. A suite that was
-      // already red cannot be used to prove a new assertion fails.
-      const preexisting = await validation.runCheck('test', profile.testCommand);
+      // The repository's own checks, BEFORE anything is added — twice, so a test that
+      // fails only sometimes is told apart from one that is simply broken. Tests
+      // already failing or flaky here are set aside by name rather than blocking the
+      // incident, and the pull request says which.
+      const baseline = await establishBaseline(validation, profile.testCommand);
+      const preexisting = baseline.runs[0]!;
+      const excluded = excludedFromGate(baseline);
       result.preexistingChecks = preexisting;
-      step('reproducing', `Existing checks at the deployed revision: ${describeCheck(preexisting)}`);
+      result.suiteBaseline = baseline;
+      step('reproducing', `Existing checks at the deployed revision: ${describeCheck(preexisting)}${describeBaseline(baseline)}`);
 
       const context: PatchContext = {
         service: input.service,
@@ -778,7 +914,7 @@ export class IncidentWorkflow {
         changedFiles,
         sources: await this.readSuspectSources(sandbox, cluster, findings),
         testCommand: profile.testCommand,
-        existingTestExample: await this.readTestExample(sandbox),
+        existingTestExample: await this.readTestExample(sandbox, frame ? toRepositoryPath(frame.file) : null),
         investigation: findings,
       };
 
@@ -824,6 +960,8 @@ export class IncidentWorkflow {
         command: isolated ?? profile.testCommand ?? 'node --test',
         expectedFailureMarkers: proposedTest.expectedFailureMarkers,
         baseline: preexisting,
+        excludedFailures: excluded,
+        isolated: Boolean(isolated),
       });
       result.reproduction = attempt;
 
@@ -850,6 +988,7 @@ export class IncidentWorkflow {
         profile,
         test: proposedTest,
         preexisting,
+        excluded,
         step,
         advance,
       });
@@ -906,6 +1045,7 @@ export class IncidentWorkflow {
               slackChannel: input.slackChannel,
               slackThreadTs: thread.id,
               preexisting,
+              baseline: result.suiteBaseline,
               repairAttempted: outcome.repairAttempted,
               diffGap,
               modelUsage: result.investigation,
@@ -1073,6 +1213,8 @@ export class IncidentWorkflow {
       deployedRevision: null,
       regressionTest: null,
       preexistingChecks: null,
+      suiteBaseline: null,
+      dependencies: null,
       repairAttempted: false,
       recoveryVerdict: null,
       slackThreadTs: null,
@@ -1123,7 +1265,7 @@ export class IncidentWorkflow {
     await advance('DEPLOYING_FIX', `Merged fix shipping for ${input.service}.`);
     await advance('VERIFYING_RECOVERY', 'Watching telemetry for a return to baseline.');
 
-    // ── 7. Watch Datadog again ───────────────────────────────────────────────
+    // ── 7. Watch production again ───────────────────────────────────────────────
     // A window that starts before the merge measures the incident, not the fix.
     // That used to happen whenever a merge landed later than the window fixed at
     // PR-open time, so the window is checked against GitHub's own merge time.
@@ -1137,7 +1279,7 @@ export class IncidentWorkflow {
             ? `The post-fix window starts at ${window.from.toISOString()}, before #${pr.number} merged at ` +
               `${pr.mergedAt.toISOString()}; it would measure traffic from before the fix.`
             : null;
-    const verifier = new RecoveryVerifier(this.deps.observability);
+    const verifier = new RecoveryVerifier(this.deps.observability, this.alertSource());
     const recovery =
       unmeasurable !== null || 'unavailable' in window
         ? unmeasuredRecovery(`Recovery could not be measured: ${unmeasurable}`)
@@ -1330,7 +1472,7 @@ export class IncidentWorkflow {
         for (const window of windows) {
           try {
             const call = await ctx.tool(
-              'datadog.queryMetric',
+              'observability.queryMetric',
               { service: alert.service, metric, window: window.kind },
               () => this.deps.observability.queryMetric(alert.service, metric, window),
             );
@@ -1375,9 +1517,10 @@ export class IncidentWorkflow {
     await persistence.evidence.record({
       organizationId: persistence.organizationId,
       incidentId,
-      kind: 'DATADOG_MONITOR',
+      kind: 'OBS_ALERT',
+      backend: alert.backend,
       provenance: 'OBSERVED',
-      summary: `Monitor "${alert.monitor.name}" is in ALERT since ${alert.firedAt.toISOString()}.`,
+      summary: `${alert.alertNoun} "${alert.monitor.name}" is in ALERT since ${alert.firedAt.toISOString()}.`,
       sourceToolCallId: alert.toolCallIds.monitors,
       sourceRef: `monitor:${alert.monitor.id}`,
       payload: { query: alert.monitor.query, status: alert.monitor.status },
@@ -1390,7 +1533,8 @@ export class IncidentWorkflow {
     await persistence.evidence.record({
       organizationId: persistence.organizationId,
       incidentId,
-      kind: frame ? 'STACK_TRACE' : 'DATADOG_LOG',
+      kind: frame ? 'STACK_TRACE' : 'OBS_LOG',
+      backend: alert.backend,
       provenance: 'OBSERVED',
       summary:
         `${cluster.errorType ?? 'Error'} occurred ${cluster.count} times between ` +
@@ -1433,29 +1577,45 @@ export class IncidentWorkflow {
       if (content !== null) sources[path] = content;
     }
 
-    // One hop of relative imports, so the shape a patch must satisfy is present.
+    // One hop of imports, so the shape a patch must satisfy is present.
     for (const [path, content] of Object.entries({ ...sources })) {
-      const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-      for (const match of content.matchAll(/from\s+['"](\.[^'"]+)['"]/g)) {
-        const resolved = normaliseRelative(dir, match[1]!);
-        if (!resolved || sources[resolved] !== undefined) continue;
-        const imported = await sandbox.readFile(resolved);
-        if (imported !== null) sources[resolved] = imported;
+      for (const candidates of importedModules(path, content)) {
+        for (const candidate of candidates) {
+          if (sources[candidate] !== undefined) break;
+          const imported = await sandbox.readFile(candidate);
+          if (imported !== null) {
+            sources[candidate] = imported;
+            break;
+          }
+        }
       }
     }
     return sources;
   }
 
-  /** One existing test, so a new one matches the repository's conventions. */
-  private async readTestExample(sandbox: Sandbox): Promise<{ path: string; source: string } | null> {
-    for (const path of ['test', 'tests', '__tests__', 'src']) {
-      for (const name of ['checkout.test.ts', 'index.test.ts', 'main.test.ts']) {
-        const candidate = `${path}/${name}`;
-        const source = await sandbox.readFile(candidate);
-        if (source !== null) return { path: candidate, source };
-      }
-    }
-    return null;
+  /**
+   * One existing test, so a new one matches the repository's conventions.
+   *
+   * Found by the naming conventions test runners use, not by a list of file names,
+   * and chosen nearest the failing file: a test beside the code under suspicion
+   * shows how that part of the repository is tested.
+   */
+  private async readTestExample(sandbox: Sandbox, near: string | null): Promise<{ path: string; source: string } | null> {
+    const tests = (await sandbox.listFiles()).filter(isTestFile);
+    if (tests.length === 0) return null;
+    const language = near ? near.slice(near.lastIndexOf('.')) : null;
+    const score = (path: string): number => {
+      if (!near) return 0;
+      const a = near.split('/');
+      const b = path.split('/');
+      let shared = 0;
+      while (shared < a.length - 1 && shared < b.length - 1 && a[shared] === b[shared]) shared++;
+      const stem = a[a.length - 1]!.replace(/\.[^.]+$/, '');
+      return shared * 2 + (path.includes(stem) ? 3 : 0) + (language && path.endsWith(language) ? 1 : 0);
+    };
+    const best = [...tests].sort((x, y) => score(y) - score(x) || x.length - y.length || x.localeCompare(y))[0]!;
+    const source = await sandbox.readFile(best);
+    return source === null ? null : { path: best, source };
   }
 
   /**
@@ -1465,6 +1625,51 @@ export class IncidentWorkflow {
    * autonomy its actions require is a misconfiguration, and quietly skipping the
    * pull request would leave an incident that looks handled and is not.
    */
+  /**
+   * The same failure — same root frame, or same signature — in the hour before the
+   * deployment went out: the reason, or null when there was none (or the read could
+   * not be made, which is recorded and does not block).
+   */
+  private async failurePredatesDeployment(
+    trace: <T>(name: string, fn: (ctx: AgentRunContext) => Promise<T>) => Promise<T>,
+    alert: ProductionAlert,
+    input: WorkflowInput,
+    sha: string,
+  ): Promise<string | null> {
+    const deployedAt = input.deployment?.deployedAt;
+    const primary = alert.primary;
+    if (!deployedAt || !primary) return null;
+    const key = alert.failures.find((f) => f.cluster.signature === primary.signature)?.key ?? failureKey(primary);
+    const window = { from: new Date(deployedAt.getTime() - 60 * 60_000), to: new Date(deployedAt.getTime() - 2 * 60_000) };
+    const source = this.alertSource();
+    try {
+      const read = await trace('DeploymentObserver', async (ctx) =>
+        (await ctx.tool('observability.readErrors', { backend: source.backend, service: input.service, from: window.from, to: window.to, purpose: 'before the deployment' }, () =>
+          source.readErrors(input.service, window, { limit: 200 }),
+        )).value,
+      );
+      const before = read.kind === 'logs' ? clusterErrors(read.logs) : clustersFromGroups(read.groups);
+      const same = before.find((c) => failureKey(c) === key || c.signature === primary.signature);
+      if (!same) return null;
+      return (
+        `The failure predates the deployment: ${same.count} occurrence(s) of the same ${same.errorType ?? 'error'} ` +
+        `(${key}) between ${window.from.toISOString()} and ${window.to.toISOString()}, before ${sha.slice(0, 12)} ` +
+        `was deployed at ${deployedAt.toISOString()}. It was not introduced by this deployment, so it is not repaired ` +
+        `as a regression of it. No pull request was opened; it is handed over for a person to look at.`
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /** The configured alert source, or the metrics backend when it is one. */
+  private alertSource(): AlertSource {
+    if (this.deps.alerts) return this.deps.alerts;
+    const obs = this.deps.observability as Partial<AlertSource> & ObservabilityProvider;
+    if (typeof obs.listAlerts === 'function' && typeof obs.readErrors === 'function') return obs as unknown as AlertSource;
+    throw new Error(`No alert source: ${obs.backend ?? 'the observability provider'} cannot list alerts, and none was configured.`);
+  }
+
   private assertAllowed(tool: ToolDefinition): void {
     assertToolAllowed(tool, { autonomy: this.deps.autonomy ?? DEFAULT_AUTONOMY_LEVEL });
   }
@@ -1569,6 +1774,8 @@ export class IncidentWorkflow {
     test: RegressionTestProposal;
     /** The suite at the deployed revision, before anything was added. */
     preexisting: ValidationRun;
+    /** Tests excluded from the gate by name; null when none can be. */
+    excluded: string[] | null;
     step: (stage: WorkflowStage, summary: string, detail?: Record<string, unknown>) => void;
     advance: (to: IncidentState, summary: string) => Promise<void>;
   }): Promise<{
@@ -1671,7 +1878,16 @@ export class IncidentWorkflow {
       }
 
       await advance('VALIDATING', 'Running deterministic verification.');
-      const summary = await validation.runAll(profile);
+      const raw = await validation.runAll(profile);
+      // The suite passes the gate when it is green, or red only in tests that were
+      // already failing or flaky before anything was changed.
+      const summary = (() => {
+        const excused = raw.runs.map((r) => r.kind === 'test' && !r.skipped && !r.passed && onlyExcludedFailures(r, args.excluded));
+        if (!excused.some(Boolean)) return raw;
+        const runs = raw.runs.map((r, i) => (excused[i] ? { ...r, passed: true } : r));
+        const executed = runs.filter((r) => !r.skipped);
+        return { ...raw, runs, allPassed: executed.length > 0 && executed.every((r) => r.passed) };
+      })();
       const runs = [confirmed.afterFix!, ...summary.runs];
       step('validating', `Verification: ${summary.allPassed ? 'passed' : 'FAILED'}`, {
         ran: summary.runs.filter((r) => !r.skipped).map((r) => r.kind),
@@ -1680,7 +1896,7 @@ export class IncidentWorkflow {
 
       // A passing suite proves little if the patch made it smaller. Counted against
       // the run at the deployed revision, before anything was added.
-      const shrunk = summary.allPassed
+      const shrunk = summary.allPassed && raw.allPassed
         ? testCountRegression(
             { passed: args.preexisting.testsPassed, failed: args.preexisting.testsFailed },
             (() => {
@@ -1739,7 +1955,7 @@ export class IncidentWorkflow {
     const c = alert.primary!;
     const frame = c.topApplicationFrame;
     return [
-      `${incidentKey} — detected by Pager Developer from Datadog monitor "${alert.monitor.name}".`,
+      `${incidentKey} — detected by Pager Developer from ${alert.alertNoun} "${alert.monitor.name}".`,
       '',
       '## Observed',
       `Error: ${c.sample}`,
@@ -1820,6 +2036,7 @@ export class IncidentWorkflow {
     slackChannel: string;
     slackThreadTs: string;
     preexisting: ValidationRun;
+    baseline?: SuiteBaseline | null;
     repairAttempted: boolean;
     diffGap: string | null;
     modelUsage: InvestigationResult | null;
@@ -1868,7 +2085,7 @@ export class IncidentWorkflow {
           `\n\n</details>`
         : `## Diagnosis\nNo model investigation was available for this incident.`,
 
-      `## Evidence — observed\n- Datadog monitor "${args.alert.monitor.name}" alerting\n` +
+      `## Evidence — observed\n- ${args.alert.alertNoun} "${args.alert.monitor.name}" alerting\n` +
         `- ${c.count} matching error logs\n` +
         `- Stack trace locates the failure at ${frame ? `\`${toRepositoryPath(frame.file)}:${frame.line}\`` : 'no application frame'}`,
 
@@ -1876,6 +2093,7 @@ export class IncidentWorkflow {
 
       `## Reproduction — fail before, pass after\n` +
         `Checks at the deployed revision **before** the regression test existed: ${describeCheck(args.preexisting)}\n\n` +
+        excludedSection(args.baseline ?? null) +
         `${describeReproduction(args.reproduction)}\n\n` +
         `The test proves: ${args.test.expectedFailureDescription}\n\n` +
         `Command: \`${args.reproduction.command}\`  \n` +
@@ -1913,7 +2131,7 @@ export class IncidentWorkflow {
       `## What broke`,
       `${c.errorType ?? 'An error'} occurred ${c.count} times on ${c.affectedRoutes.join(', ') || 'production'}, ` +
         `first seen ${c.firstSeen.toISOString()} and last seen ${c.lastSeen.toISOString()}. ` +
-        `Datadog monitor "${alert.monitor.name}" alerted at ${alert.firedAt.toISOString()}.`,
+        `${alert.alertNoun} "${alert.monitor.name}" alerted at ${alert.firedAt.toISOString()}.`,
       `## Root cause`,
       rootCause,
       `## How it was found`,
@@ -2020,6 +2238,59 @@ function normalisePath(path: string): string {
 }
 
 /** Resolve a relative import against a directory, without touching the filesystem. */
+/**
+ * The files a source file imports from within the repository, each as the paths it
+ * could resolve to, most likely first. Package imports are left out: they are not
+ * the repository's code.
+ *
+ * JavaScript/TypeScript: ES `import … from './x'`, bare `import './x'` and
+ * CommonJS `require('./x')`. Python: relative `from .x import y` and absolute
+ * `from pkg.mod import y` / `import pkg.mod`, tried from the repository root and
+ * from `src/`, as a module (`mod.py`) or a package (`mod/__init__.py`).
+ */
+export function importedModules(path: string, content: string): string[][] {
+  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const out: string[][] = [];
+  if (path.endsWith('.py')) {
+    const modules = [
+      ...[...content.matchAll(/^\s*from\s+(\.*[\w.]*)\s+import\b/gm)].map((m) => m[1]!),
+      ...[...content.matchAll(/^\s*import\s+([\w.]+(?:\s*,\s*[\w.]+)*)/gm)].flatMap((m) => m[1]!.split(',').map((x) => x.trim())),
+    ];
+    for (const mod of modules) {
+      const dots = /^\.*/.exec(mod)![0].length;
+      const rest = mod.slice(dots).split('.').filter(Boolean).join('/');
+      let bases: string[];
+      if (dots > 0) {
+        const up = dir.split('/').filter(Boolean).slice(0, Math.max(0, dir.split('/').filter(Boolean).length - (dots - 1)));
+        bases = [up.join('/')];
+      } else {
+        bases = ['', 'src'];
+      }
+      const candidates = bases.flatMap((b) => {
+        const stem = [b, rest].filter(Boolean).join('/');
+        return stem ? [`${stem}.py`, `${stem}/__init__.py`] : [];
+      });
+      if (candidates.length) out.push(candidates);
+    }
+    return out;
+  }
+  const specifiers = [
+    ...content.matchAll(/(?:from|import)\s+['"](\.[^'"]+)['"]/g),
+    ...content.matchAll(/require\(\s*['"](\.[^'"]+)['"]\s*\)/g),
+  ].map((m) => m[1]!);
+  for (const spec of specifiers) {
+    const resolved = normaliseRelative(dir, spec);
+    if (!resolved) continue;
+    // A specifier may name the file as written, drop its extension, or name a directory.
+    out.push(
+      /\.[cm]?[jt]sx?$/.test(resolved)
+        ? [resolved, resolved.replace(/\.js$/, '.ts')]
+        : [`${resolved}.ts`, `${resolved}.js`, `${resolved}/index.ts`, `${resolved}/index.js`, resolved],
+    );
+  }
+  return out;
+}
+
 function normaliseRelative(dir: string, specifier: string): string | null {
   const segments = [...dir.split('/').filter(Boolean), ...specifier.split('/')];
   const out: string[] = [];

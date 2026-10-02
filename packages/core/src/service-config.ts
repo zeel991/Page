@@ -32,7 +32,8 @@ export const ServiceConfig = z.object({
   repositoryId: z.string().uuid(),
   /** Where the running service reports its deployed revision. https, public. */
   healthUrl: z.string().url(),
-  alertSource: z.literal('datadog').default('datadog'),
+  /** Where incidents are noticed. The service's name is its Datadog service tag or its Sentry project slug. */
+  alertSource: z.enum(['datadog', 'sentry']).default('datadog'),
   /** Mandatory: merge clicks count only from this channel. */
   slackChannelId: z.string().min(1, 'a Slack channel is required'),
   slackChannelName: z.string().nullable().optional(),
@@ -83,6 +84,24 @@ export function isDatadogApiUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     return parsed.protocol === 'https:' && DATADOG_API_HOSTS.has(parsed.host) && parsed.pathname.replace(/\/+$/, '') === '';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sentry's hosted API: sentry.io and its regional hosts (us.sentry.io, de.sentry.io).
+ * A self-hosted Sentry is allowed only by the operator's policy, since the token is
+ * sent wherever this URL points.
+ */
+export function isSentryApiUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === 'https:' &&
+      (parsed.host === 'sentry.io' || /^[a-z0-9-]+\.sentry\.io$/.test(parsed.host)) &&
+      parsed.pathname.replace(/\/+$/, '') === ''
+    );
   } catch {
     return false;
   }

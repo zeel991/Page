@@ -1,0 +1,126 @@
+{
+  "id": "INC-021",
+  "title": "Pickup orders without shipping crash the order total",
+  "service": "orders-api",
+  "repository": "acme/orders-api",
+  "description": "Orders API (Node, express, vitest)",
+  "defaultBranch": "main",
+  "workingTree": "orders-api",
+  "windowFrom": "2026-09-13T14:00:00Z",
+  "windowTo": "2026-09-13T15:00:00Z",
+  "deployedAt": "2026-09-13T14:31:00Z",
+  "commits": [
+    {
+      "message": "Initial orders service",
+      "author": "Priya",
+      "at": "2026-09-10T09:00:00Z",
+      "branch": "main",
+      "include": [
+        "**"
+      ],
+      "overlay": "history/before-optional-shipping"
+    },
+    {
+      "message": "Allow pickup orders without shipping",
+      "author": "Dana",
+      "at": "2026-09-13T14:20:00Z",
+      "branch": "main",
+      "include": [
+        "src/validate.js"
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "service": "orders-api",
+      "metric": "error_rate",
+      "unit": "ratio",
+      "baseline": 0.002,
+      "after": 0.121,
+      "jitter": 0.08
+    },
+    {
+      "service": "orders-api",
+      "metric": "http_5xx_rate",
+      "unit": "ratio",
+      "baseline": 0.002,
+      "after": 0.118,
+      "jitter": 0.08
+    },
+    {
+      "service": "orders-api",
+      "metric": "latency_p95",
+      "unit": "ms",
+      "baseline": 140,
+      "after": 141,
+      "jitter": 0.04
+    },
+    {
+      "service": "orders-api",
+      "metric": "latency_p50",
+      "unit": "ms",
+      "baseline": 48,
+      "after": 48,
+      "jitter": 0.04
+    },
+    {
+      "service": "orders-api",
+      "metric": "request_throughput",
+      "unit": "requests/s",
+      "baseline": 310,
+      "after": 305,
+      "jitter": 0.03
+    },
+    {
+      "service": "orders-api",
+      "metric": "availability",
+      "unit": "ratio",
+      "baseline": 0.9998,
+      "after": 0.9996,
+      "jitter": 0.0002
+    }
+  ],
+  "logs": [
+    {
+      "service": "orders-api",
+      "level": "error",
+      "message": "TypeError: Cannot read properties of undefined (reading 'speed')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'speed')\n    at shippingCents (file:///app/src/shipping.js:5:40)\n    at orderTotalCents (file:///app/src/orders.js:5:18)\n    at file:///app/src/app.js:11:47\n    at Layer.handle [as handle_request] (/app/node_modules/express/lib/router/layer.js:95:5)\n    at next (/app/node_modules/express/lib/router/route.js:149:13)",
+      "from": "2026-09-13T14:32:00Z",
+      "count": 22,
+      "intervalSeconds": 45,
+      "attributes": {
+        "http.route": "POST /orders",
+        "http.status_code": 500
+      }
+    },
+    {
+      "service": "orders-api",
+      "level": "info",
+      "message": "order created",
+      "from": "2026-09-13T14:05:00Z",
+      "count": 12,
+      "intervalSeconds": 120
+    }
+  ],
+  "monitors": [
+    {
+      "name": "orders-api error rate",
+      "service": "orders-api",
+      "query": "avg(last_5m):sum:trace.http.request.errors{service:orders-api}.as_rate() > 0.05",
+      "state": "Alert",
+      "transitionedAt": "2026-09-13T14:34:00Z"
+    }
+  ],
+  "slackChannels": [
+    "#incidents",
+    "#commerce-team"
+  ],
+  "pages": [
+    {
+      "id": "runbook-orders",
+      "title": "Runbook: orders-api",
+      "file": "runbooks/orders-api.md"
+    }
+  ]
+}

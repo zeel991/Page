@@ -39,6 +39,19 @@ export async function testDatadog(
   }
 }
 
+export async function testSentry(
+  input: { baseUrl: string; token: string; organization: string },
+  fetchImpl?: typeof globalThis.fetch,
+): Promise<ConnectionResult> {
+  const http = new Http({ baseUrl: input.baseUrl, headers: { authorization: `Bearer ${input.token}` }, retries: 0, ...(fetchImpl ? { fetchImpl } : {}) });
+  try {
+    const org = await http.get<{ slug?: string; name?: string }>(`/api/0/organizations/${encodeURIComponent(input.organization)}/`);
+    return { ok: true, detail: `token can read organization ${org.slug ?? input.organization}` };
+  } catch (err) {
+    return failed(err);
+  }
+}
+
 export async function testNotion(input: { baseUrl?: string; token: string }, fetchImpl?: typeof globalThis.fetch): Promise<ConnectionResult> {
   const http = new Http({
     baseUrl: input.baseUrl ?? 'https://api.notion.com',

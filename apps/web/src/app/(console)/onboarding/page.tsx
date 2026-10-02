@@ -30,7 +30,7 @@ const ACTION: Record<string, { href: string; label: string } | null> = {
   signed_in: null,
   github: { href: '/onboarding/github/install', label: 'Install on GitHub' },
   repository: { href: '/services#repositories', label: 'Pick a repository' },
-  datadog: { href: '/settings#datadog', label: 'Connect Datadog' },
+  datadog: { href: '/settings#datadog', label: 'Connect Datadog or Sentry' },
   slack: { href: '/onboarding/slack/install', label: 'Add to Slack' },
   service: { href: '/services#new', label: 'Add a service' },
   health: { href: '/services', label: 'Test the health URL' },

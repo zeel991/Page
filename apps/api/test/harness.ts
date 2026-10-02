@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { LocalKeyWrapper, signToken } from '@pager/core';
 import { CredentialVault, IdentityRepository, createDatabase, migrate, type DatabaseHandle } from '@pager/db';
 import { GitHubAppClient, PAGER_APP_MANIFEST, SlackAppClient, registerViaManifest } from '@pager/providers';
-import { INC_001, LocalTwinServer, seedFromFixture } from '@pager/twin-local';
+import { INC_001, LocalTwinServer, seedFromFixture, type TwinEndpoints } from '@pager/twin-local';
 import { buildApp, type AppDeps } from '../src/app.ts';
 
 /**
@@ -27,7 +27,8 @@ export interface Harness {
   call(method: string, url: string, token: string, payload?: unknown): ReturnType<FastifyInstance['inject']>;
 }
 
-export async function harness(extra: Partial<AppDeps> = {}): Promise<Harness> {
+/** `extra` may depend on the twins' endpoints, for adapters constructed against them. */
+export async function harness(extra: Partial<AppDeps> | ((endpoints: TwinEndpoints) => Partial<AppDeps>) = {}): Promise<Harness> {
   const twin = new LocalTwinServer({ now: () => Date.now() });
   twin.seed(seedFromFixture(INC_001));
   const endpoints = await twin.start();
@@ -56,11 +57,12 @@ export async function harness(extra: Partial<AppDeps> = {}): Promise<Harness> {
     // and public https health URLs.
     configPolicy: {
       allowDatadogUrl: (url) => url === endpoints.datadog,
+      allowSentryUrl: (url) => url === endpoints.sentry,
       allowPrivateHealthUrl: true,
       notionBaseUrl: endpoints.notion,
       resendBaseUrl: endpoints.resend,
     },
-    ...extra,
+    ...(typeof extra === 'function' ? extra(endpoints) : extra),
   });
   const identity = new IdentityRepository(handle.db);
 

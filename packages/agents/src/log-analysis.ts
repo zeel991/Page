@@ -1,4 +1,4 @@
-import type { LogEntry } from '@pager/providers';
+import type { LogEntry, ObservedErrorGroup } from '@pager/providers';
 
 /**
  * Deterministic log analysis.
@@ -38,10 +38,18 @@ export interface ErrorCluster {
   affectedRoutes: string[];
 }
 
-const DEPENDENCY_MARKERS = ['node_modules/', 'site-packages/', 'vendor/', '/usr/lib/', 'node:internal'];
+const DEPENDENCY_MARKERS = ['node_modules/', 'site-packages/', 'dist-packages/', 'vendor/', '/usr/lib/', 'node:internal', '<frozen ', '/lib/python3'];
 
-/** Parse a V8-style stack trace into frames. */
+/**
+ * Parse a stack trace into frames, innermost first.
+ *
+ * Two shapes: V8's (`at fn (/path/file.ts:12:5)`, innermost first) and Python's
+ * traceback (`File "/path/file.py", line 12, in fn`, outermost first — so its frames
+ * are reversed, and "the first application frame" means the same thing for both).
+ */
 export function parseStackTrace(stack: string): StackFrame[] {
+  const python = parsePythonTraceback(stack);
+  if (python.length > 0) return python;
   const frames: StackFrame[] = [];
 
   for (const raw of stack.split('\n')) {
@@ -72,6 +80,29 @@ export function parseStackTrace(stack: string): StackFrame[] {
   return frames;
 }
 
+/** Frames from a Python traceback, innermost first. Empty when the text is not one. */
+export function parsePythonTraceback(stack: string): StackFrame[] {
+  const frames: StackFrame[] = [];
+  for (const m of stack.matchAll(/^\s*File "(.+?)", line (\d+)(?:, in (.+?))?\s*$/gm)) {
+    const file = m[1]!;
+    frames.push({
+      functionName: m[3] && m[3] !== '<module>' ? m[3] : null,
+      file,
+      line: Number(m[2]),
+      column: null,
+      isDependency: DEPENDENCY_MARKERS.some((d) => file.includes(d)),
+    });
+  }
+  return frames.reverse();
+}
+
+/** The exception line a Python traceback ends with, e.g. "KeyError: 'discount'". */
+function pythonExceptionLine(stack: string): string | null {
+  if (!/Traceback \(most recent call last\):/.test(stack)) return null;
+  const lines = stack.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines[lines.length - 1] ?? null;
+}
+
 /**
  * Normalise an error message so instances of the same failure group together.
  *
@@ -95,31 +126,12 @@ export function errorType(message: string): string | null {
 }
 
 /**
- * Common container working directories.
+ * The path a stack frame names, without a `file://` scheme or leading slashes.
  *
- * Listed explicitly rather than matched by a pattern, because `app` is ambiguous:
- * it is both a container root (`/app/src/...`) and a legitimate source directory
- * (`app/routes/...`), and a lookahead cannot tell those apart.
- */
-const CONTAINER_ROOTS = [
-  '/app/',
-  '/var/task/',
-  '/usr/src/app/',
-  '/home/node/app/',
-  '/workspace/',
-  '/srv/app/',
-  // Render puts the checkout of the repository here, so a frame reads
-  // /opt/render/project/src/<repo path>. Observed on a real deployment.
-  '/opt/render/project/src/',
-];
-
-/**
- * Strip a repository-relative path out of an absolute runtime path.
- *
- * Node emits `file://` URLs in stack frames for ES modules, so the scheme is
- * removed before the container root is matched. Without that the whole path falls
- * through unchanged and every downstream file read misses — which looks like "the
- * file does not exist at this revision" rather than "we failed to parse the frame".
+ * Node emits `file://` URLs for ES modules. What stays is the runtime's absolute
+ * path with its leading slash removed; which part of it is the repository is not
+ * guessable from the path alone (`/app/src/x.ts` and `app/routes/x.ts` look alike),
+ * so it is decided against the repository's own files by `locateInRepository`.
  */
 export function toRepositoryPath(file: string): string {
   let path = file;
@@ -130,10 +142,64 @@ export function toRepositoryPath(file: string): string {
       path = path.slice('file://'.length);
     }
   }
-  for (const root of CONTAINER_ROOTS) {
-    if (path.startsWith(root)) return path.slice(root.length);
-  }
   return path.replace(/^\/+/, '');
+}
+
+/**
+ * The repository file a runtime path refers to: the longest suffix of it that is a
+ * file in the repository. Derives the deployment's working directory (`/app/`,
+ * `/opt/render/project/src/`, `/var/task/`, anything) from the repository itself
+ * instead of from a list of known platforms. Null when no suffix is a repository
+ * file.
+ */
+export function repositoryPathOf(file: string, repositoryFiles: ReadonlySet<string>): string | null {
+  const segments = toRepositoryPath(file).split('/').filter(Boolean);
+  for (let i = 0; i < segments.length; i++) {
+    const candidate = segments.slice(i).join('/');
+    if (repositoryFiles.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Rewrite a cluster's frames to repository paths, knowing the repository's files.
+ *
+ * A frame that names a repository file becomes that path. With a complete listing,
+ * a frame that names none is not application code — a runtime internal, a bundled
+ * copy, a dependency installed outside `node_modules` — and is marked so, which can
+ * move the top application frame. With a partial listing, only matches are trusted
+ * and nothing is reclassified.
+ */
+export function locateInRepository(cluster: ErrorCluster, listing: { paths: readonly string[]; truncated: boolean }): ErrorCluster {
+  const files = new Set(listing.paths);
+  const frames = cluster.frames.map((f) => {
+    const path = repositoryPathOf(f.file, files);
+    if (path) return { ...f, file: path };
+    return listing.truncated || f.isDependency ? f : { ...f, isDependency: true };
+  });
+  const application = frames.filter((f) => !f.isDependency);
+  return {
+    ...cluster,
+    frames,
+    topApplicationFrame: application[0] ?? null,
+    entirelyInDependencies: frames.length > 0 && application.length === 0,
+  };
+}
+
+/**
+ * What makes two clusters the same failure: where it happens.
+ *
+ * Messages vary with data (`reading 'percentOff'` vs `reading 'amount'` from one
+ * bad line), so the grouping is by root frame — the first application frame's file
+ * and line. A failure with no application frame is keyed by its type and signature
+ * instead, since there is nowhere else to say it happens.
+ */
+export function failureKey(cluster: ErrorCluster): string {
+  const frame = cluster.topApplicationFrame;
+  // The runtime path as reported (only a file:// scheme removed): stable from poll to
+  // poll, and not mistakable for a repository path, which is resolved later.
+  if (frame) return `${frame.file.replace(/^file:\/\//, '')}:${frame.line ?? '?'}`;
+  return `${cluster.errorType ?? 'Error'}|${cluster.signature}`.slice(0, 200);
 }
 
 /**
@@ -192,6 +258,39 @@ export function clusterErrors(logs: readonly LogEntry[]): ErrorCluster[] {
 }
 
 /**
+ * Clusters from error groups a backend already structured (Sentry's issues).
+ *
+ * The frames arrive typed, with the backend's own in-app judgement, so nothing is
+ * parsed out of text: the cluster is the group, reshaped.
+ */
+export function clustersFromGroups(groups: readonly ObservedErrorGroup[]): ErrorCluster[] {
+  return groups
+    .map((g) => {
+      const frames: StackFrame[] = g.frames.map((f) => ({
+        functionName: f.functionName,
+        file: f.file,
+        line: f.line,
+        column: f.column,
+        isDependency: !f.inApp,
+      }));
+      const application = frames.filter((f) => !f.isDependency);
+      return {
+        signature: errorSignature(g.message),
+        sample: g.message,
+        errorType: g.errorType,
+        count: g.count,
+        firstSeen: g.firstSeen,
+        lastSeen: g.lastSeen,
+        frames,
+        topApplicationFrame: application[0] ?? null,
+        entirelyInDependencies: frames.length > 0 && application.length === 0,
+        affectedRoutes: g.routes,
+      };
+    })
+    .sort((a, b) => b.count - a.count);
+}
+
+/**
  * The route a failure happened on.
  *
  * `http.route` is the OpenTelemetry convention, but plenty of services log a plain
@@ -221,6 +320,10 @@ const ERROR_TYPE_KEYS = ['error', 'error.kind', 'error.type', 'exception.type'];
 function errorTypeOf(log: LogEntry): string | null {
   const fromMessage = errorType(log.message);
   if (fromMessage) return fromMessage;
+  // A Python logger's message is often just the text; the type ends the traceback.
+  const last = log.stackTrace ? pythonExceptionLine(log.stackTrace) : null;
+  const fromTrace = last ? errorType(last.replace(/^(?:[a-z_][\w]*\.)+/, '')) : null;
+  if (fromTrace) return fromTrace;
   for (const key of ERROR_TYPE_KEYS) {
     const value = log.attributes[key];
     if (typeof value === 'string' && /^[A-Z][A-Za-z0-9_]*$/.test(value)) return value;
@@ -231,17 +334,22 @@ function errorTypeOf(log: LogEntry): string | null {
 /**
  * Was this failure anticipated?
  *
- * The trigger for an incident is a break we did not prepare for. A failure whose
- * signature matches a documented known failure mode is still real, but it is a known
- * one — it should be handled by its runbook rather than investigated from scratch.
+ * The trigger for an incident is a break we did not prepare for. A failure that
+ * matches a documented failure mode is still real, but it is a known one — it
+ * should be handled by its runbook rather than investigated from scratch.
  *
- * Matching is deliberately conservative: a known mode must be named specifically
- * enough to appear in the error text, so a vague runbook cannot suppress a novel
- * failure by accident.
+ * A match needs the same error type AND where or how it fails: a location the
+ * runbook names (a package or file among the failure's frames) or a fragment of
+ * the message it names. Mentioning an error type is not enough — "TypeError" in a
+ * runbook must not silence every TypeError the service will ever throw.
  */
 export interface KnownFailureMode {
-  /** Distinctive text that appears in the error, e.g. "PaymentGatewayError". */
-  marker: string;
+  /** The exact error type, e.g. "PaymentGatewayError". */
+  errorType: string;
+  /** Packages or paths the failure's frames sit in, e.g. "@acme/payments-sdk". */
+  locations: string[];
+  /** Fragments of the error message, e.g. "503" or "connection reset". */
+  messages: string[];
   description: string;
   source: string;
 }
@@ -256,25 +364,34 @@ export function assessNovelty(
   cluster: ErrorCluster,
   known: readonly KnownFailureMode[],
 ): NoveltyVerdict {
-  const haystack = `${cluster.sample} ${cluster.frames.map((f) => f.file).join(' ')}`.toLowerCase();
-
+  const sample = cluster.sample.toLowerCase();
+  const vague: string[] = [];
   for (const mode of known) {
-    const marker = mode.marker.trim();
-    // Too short a marker would match almost anything.
-    if (marker.length < 4) continue;
-    if (haystack.includes(marker.toLowerCase())) {
+    if (!cluster.errorType || mode.errorType !== cluster.errorType) continue;
+    if (mode.locations.length === 0 && mode.messages.length === 0) {
+      vague.push(mode.source);
+      continue;
+    }
+    const where = mode.locations.find((loc) => cluster.frames.some((f) => f.file.includes(loc)));
+    const how = mode.messages.find((m) => sample.includes(m.toLowerCase()));
+    if (where || how) {
       return {
         novel: false,
         matched: mode,
-        reason: `Matches a documented failure mode ("${marker}") from ${mode.source}.`,
+        reason:
+          `Matches a documented failure mode from ${mode.source}: ${mode.errorType}` +
+          (where ? ` in ${where}` : '') +
+          (how ? ` ("${how}")` : '') +
+          '.',
       };
     }
   }
-
   return {
     novel: true,
     matched: null,
-    reason: 'No documented failure mode matches this error signature.',
+    reason: vague.length
+      ? `${cluster.errorType} is mentioned in ${[...new Set(vague)].join(', ')}, but without a location or message specific enough to say this failure is the one documented.`
+      : 'No documented failure mode matches this error type with its location or message.',
   };
 }
 

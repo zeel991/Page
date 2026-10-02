@@ -54,12 +54,12 @@ export async function collectWindows(
   for (const metric of metrics) {
     try {
       const before = await ctx.tool(
-        'datadog.queryMetric',
+        'observability.queryMetric',
         { service, metric, window: 'baseline', from: baseline.from, to: baseline.to },
         () => observability.queryMetric(service, metric, baseline),
       );
       const after = await ctx.tool(
-        'datadog.queryMetric',
+        'observability.queryMetric',
         { service, metric, window: 'observation', from: observation.from, to: observation.to },
         () => observability.queryMetric(service, metric, observation),
       );

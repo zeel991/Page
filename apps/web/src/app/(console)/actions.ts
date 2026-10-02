@@ -1,6 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
 import { apiCall, type ApiResult } from '@/lib/api';
 
 /**
@@ -61,6 +62,7 @@ export async function createService(_prev: FormState | null, form: FormData): Pr
       name: text(form, 'name'),
       repositoryId: text(form, 'repositoryId'),
       healthUrl: text(form, 'healthUrl'),
+      alertSource: text(form, 'alertSource') || 'datadog',
       slackChannelId: slackChannelId ?? '',
       slackChannelName: slackChannelName ?? null,
       baseBranch: text(form, 'baseBranch') || null,
@@ -99,6 +101,20 @@ export async function saveDatadog(_prev: FormState | null, form: FormData): Prom
   return stateOf(r, 'Saved. Test the connection to confirm the keys work.');
 }
 
+export async function saveSentry(_prev: FormState | null, form: FormData): Promise<FormState> {
+  const r = await apiCall('/api/integrations/sentry', {
+    method: 'PUT',
+    body: {
+      baseUrl: text(form, 'baseUrl') || 'https://sentry.io',
+      organization: text(form, 'organization'),
+      token: secret(form, 'token'),
+      webhookSecret: secret(form, 'webhookSecret'),
+    },
+  });
+  refresh();
+  return stateOf(r, 'Saved. Test the connection to confirm the token can read the organization.');
+}
+
 export async function saveNotion(_prev: FormState | null, form: FormData): Promise<FormState> {
   const r = await apiCall('/api/integrations/notion', { method: 'PUT', body: { token: text(form, 'token') } });
   refresh();
@@ -131,4 +147,20 @@ export async function saveBudget(_prev: FormState | null, form: FormData): Promi
   const r = await apiCall('/api/budget', { method: 'PUT', body: { monthlyBudgetUsd: value } });
   refresh();
   return stateOf(r, value === null ? 'Budget cleared: the plan’s included spend applies on the deployment’s key; your own key has no cap.' : `Budget set to $${value.toFixed(2)} a month.`);
+}
+
+// ── Billing ───────────────────────────────────────────────────────────────────
+
+/** Open Dodo's hosted checkout for a plan. Owners only; the API says so otherwise. */
+export async function startCheckout(planId: string, _prev: FormState | null): Promise<FormState> {
+  const r = await apiCall<{ url?: string }>('/api/billing/checkout', { method: 'POST', body: { planId } });
+  if (r.ok && r.body.url) redirect(r.body.url);
+  return stateOf(r, '');
+}
+
+/** Dodo's customer portal: payment method, invoices, cancellation. */
+export async function openBillingPortal(_prev: FormState | null): Promise<FormState> {
+  const r = await apiCall<{ url?: string }>('/api/billing/portal', { method: 'POST' });
+  if (r.ok && r.body.url) redirect(r.body.url);
+  return stateOf(r, '');
 }

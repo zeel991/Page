@@ -30,7 +30,7 @@ const claim = (over: Partial<Claim> = {}): Claim => ({
 });
 
 describe('evidence gate', () => {
-  const evidence = [ev('log-831', 'DATADOG_LOG'), ev('diff-31', 'CODE_DIFF')];
+  const evidence = [ev('log-831', 'OBS_LOG'), ev('diff-31', 'CODE_DIFF')];
 
   it('rejects a fact asserted with no evidence at all', () => {
     expect(() => assertClaimSupported(claim({ status: 'FACT' }), evidence))
@@ -53,7 +53,7 @@ describe('evidence gate', () => {
   });
 
   it('refuses promotion when several citations share one kind', () => {
-    const sameKind = [ev('log-1', 'DATADOG_LOG'), ev('log-2', 'DATADOG_LOG')];
+    const sameKind = [ev('log-1', 'OBS_LOG'), ev('log-2', 'OBS_LOG')];
     const c = claim({ evidenceIds: ['log-1', 'log-2'] });
     expect(() => promoteToFact(c, sameKind)).toThrow(/distinct evidence kinds/);
   });

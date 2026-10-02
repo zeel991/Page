@@ -50,7 +50,7 @@ export const membershipRoleEnum = pgEnum('membership_role', ['owner', 'admin', '
 /**
  * What a workspace's plan allows. Enforced by the API (services) and the worker
  * (incidents per month, and the model budget when the operator's key pays).
- * Billing is not wired: a plan is assigned, not bought.
+ * A paid plan is bought through Dodo Payments (billing_subscriptions).
  */
 export const plans = pgTable('plans', {
   id: text('id').primaryKey(),
@@ -408,6 +408,8 @@ export const evidence = pgTable('evidence', {
   organizationId: uuid('organization_id').notNull().references(() => organizations.id),
   incidentId: uuid('incident_id').notNull().references(() => incidents.id, { onDelete: 'cascade' }),
   kind: text('kind').notNull(),
+  /** For OBS_* evidence: which backend produced it ("datadog", "sentry"). */
+  backend: text('backend'),
   provenance: provenanceEnum('provenance').notNull(),
   summary: text('summary').notNull(),
   sourceToolCallId: uuid('source_tool_call_id').notNull().references(() => toolCalls.id),
@@ -605,6 +607,11 @@ export const revisionRuns = pgTable('revision_runs', {
   organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
   serviceId: uuid('service_id').notNull().references(() => services.id, { onDelete: 'cascade' }),
   deployedRevision: text('deployed_revision').notNull(),
+  /**
+   * Which distinct failure on this revision the run is about (the watcher's root
+   * frame key). '' for runs from before a revision could carry several.
+   */
+  failureKey: text('failure_key').notNull().default(''),
   /** 'running' | 'not_escalated' | 'halted' | 'awaiting_merge' | 'verifying' | 'settled' | 'closed_unmerged' */
   phase: text('phase').notNull().default('running'),
   incidentId: uuid('incident_id').references(() => incidents.id, { onDelete: 'set null' }),
@@ -631,7 +638,7 @@ export const revisionRuns = pgTable('revision_runs', {
   outputTokens: bigint('output_tokens', { mode: 'number' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [uniqueIndex('revision_runs_service_revision_idx').on(t.serviceId, t.deployedRevision)]);
+}, (t) => [uniqueIndex('revision_runs_service_revision_failure_idx').on(t.serviceId, t.deployedRevision, t.failureKey)]);
 
 /**
  * One model call's usage and cost. Tokens come from the provider's response; cost is
@@ -655,3 +662,42 @@ export const usageEvents = pgTable('usage_events', {
   usdCost: doublePrecision('usd_cost'),
   at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [index('usage_events_org_time_idx').on(t.organizationId, t.at)]);
+
+/**
+ * A workspace's paid subscription, as the payment provider (Dodo Payments) last
+ * reported it. One row per workspace: resubscribing after a cancellation replaces
+ * it. Never edited from the console: only a signed webhook, or a read of the
+ * provider's own subscription, changes it, and `organizations.plan_id` follows it.
+ */
+export const billingSubscriptions = pgTable('billing_subscriptions', {
+  organizationId: uuid('organization_id').primaryKey().references(() => organizations.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull().default('dodo'),
+  customerId: text('customer_id'),
+  subscriptionId: text('subscription_id').notNull().unique(),
+  productId: text('product_id').notNull(),
+  planId: text('plan_id').notNull().references(() => plans.id),
+  /** The provider's own status: active, past_due, on_hold, cancelled, … */
+  status: text('status').notNull(),
+  nextBillingAt: timestamp('next_billing_at', { withTimezone: true }),
+  cancelAtPeriodEnd: boolean('cancel_at_period_end').notNull().default(false),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Checkout sessions this API opened, so a payment that names only its session can
+ * be traced to the workspace that asked for it.
+ */
+export const billingCheckouts = pgTable('billing_checkouts', {
+  sessionId: text('session_id').primaryKey(),
+  organizationId: uuid('organization_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  planId: text('plan_id').notNull().references(() => plans.id),
+  createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Webhook deliveries already handled, by the sender's delivery id, so a retry is not applied twice. */
+export const webhookDeliveries = pgTable('webhook_deliveries', {
+  provider: text('provider').notNull(),
+  deliveryId: text('delivery_id').notNull(),
+  receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [uniqueIndex('webhook_deliveries_idx').on(t.provider, t.deliveryId)]);

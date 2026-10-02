@@ -155,7 +155,7 @@ export default async function ServicesPage() {
             <p className="text-[12px] text-muted">Pick a repository above first.</p>
           ) : (
             <ActionForm action={createService} submit="Save service" className="grid max-w-3xl gap-4 md:grid-cols-2">
-              <Field label="Service name" hint="As Datadog knows it: the value of its service tag.">
+              <Field label="Service name" hint="Its Datadog service tag, or its Sentry project slug.">
                 <input name="name" required className={INPUT} placeholder="checkout-api" />
               </Field>
               <Field label="Repository">
@@ -186,6 +186,12 @@ export default async function ServicesPage() {
                   </p>
                 )}
               </Field>
+              <Field label="Alerts from" hint="Datadog: the service's monitors, by its service tag. Sentry: new and regressed issues in the project whose slug is the service name.">
+                <select name="alertSource" defaultValue="datadog" className={INPUT}>
+                  <option value="datadog">Datadog monitors</option>
+                  <option value="sentry">Sentry issues</option>
+                </select>
+              </Field>
               <Field label="Autonomy">
                 <select name="autonomyLevel" defaultValue="L3" className={INPUT}>
                   {LEVELS.map(([level, meaning]) => (
@@ -211,7 +217,7 @@ export default async function ServicesPage() {
             </ActionForm>
           )}
           <p className="mt-4 text-[11px] text-dim">
-            Alerts come from Datadog — connect it in <Link href="/settings#datadog" className="text-accent underline-offset-4 hover:underline">Settings</Link>.
+            Alerts come from Datadog or Sentry — connect one in <Link href="/settings#datadog" className="text-accent underline-offset-4 hover:underline">Settings</Link>.
           </p>
         </Panel>
       </section>

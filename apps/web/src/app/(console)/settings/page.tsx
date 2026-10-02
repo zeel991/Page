@@ -3,7 +3,9 @@ import { api } from '@/lib/api';
 import { PageHeader, Panel, dateOf } from '@/components/ui';
 import { ActionForm } from '@/components/console/action-form';
 import { Field, INPUT } from '@/components/console/fields';
-import { saveAnthropic, saveBudget, saveDatadog, saveNotion, saveResend, testIntegration } from '../actions';
+import { openBillingPortal, saveAnthropic, saveBudget, saveDatadog, saveNotion, saveResend, saveSentry, startCheckout, testIntegration } from '../actions';
+import { NOTICES } from '@/lib/notices';
+import { planFacts, priceLabel, type PlanOffer } from '@/lib/pricing';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,9 +22,17 @@ interface Integrations {
   github: { installations: { id: string; accountLogin: string }[] };
   slack: { teamId: string; teamName: string } | null;
   datadog: IntegrationStatus;
+  sentry: IntegrationStatus;
   notion: IntegrationStatus;
   resend: IntegrationStatus;
   anthropic: IntegrationStatus;
+}
+
+interface Billing {
+  enabled: boolean;
+  mode: 'test_mode' | 'live_mode' | null;
+  subscription: { planId: string; status: string; nextBillingAt: string | null; cancelAtPeriodEnd: boolean; manageable: boolean } | null;
+  plans: PlanOffer[];
 }
 
 interface Usage {
@@ -67,19 +77,72 @@ function Section({ id, title, subtitle, status, provider, children }: {
   );
 }
 
-export default async function SettingsPage() {
-  const [i, usage, me] = await Promise.all([
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ notice?: string }> }) {
+  const { notice } = await searchParams;
+  const shown = notice ? NOTICES[notice] : undefined;
+  const [i, usage, me, billing, onboarding] = await Promise.all([
     api<Integrations>('/api/integrations'),
     api<Usage>('/api/usage'),
     api<{ role: string }>('/api/me'),
+    api<Billing>('/api/billing'),
+    api<{ plan: { plan: { id: string; name: string } } }>('/api/onboarding'),
   ]);
+  const currentPlan = onboarding.plan.plan;
+  const sub = billing.subscription;
+  // The statuses that keep a paid plan (ENTITLING_STATUSES in @pager/db).
+  const paying = sub ? ['active', 'past_due'].includes(sub.status) : false;
   const hosts = [...DATADOG_API_HOSTS];
   const site = i.datadog.baseUrl ?? 'https://api.datadoghq.com';
   const resendFrom = typeof i.resend.config?.from === 'string' ? i.resend.config.from : '';
+  const sentryOrg = typeof i.sentry.config?.organization === 'string' ? i.sentry.config.organization : '';
 
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Connections, keys and spend" title="Settings" meta={`your role: ${me.role}`} />
+
+      {shown && (
+        <div role="status" className={`border px-4 py-3 text-[12px] ${shown.tone === 'ok' ? 'border-ok/40 text-ok' : 'border-sev1/40 text-sev1'}`}>
+          {shown.text}
+        </div>
+      )}
+
+      <section id="billing">
+        <Panel title="Plan and billing" subtitle={billing.enabled ? `payments by Dodo Payments${billing.mode === 'test_mode' ? ' · TEST MODE: no real charges' : ''}` : 'paid plans are not enabled on this deployment'}>
+          <p className="text-[13px] text-text">
+            On the <strong>{currentPlan.name}</strong> plan.
+            {sub && (
+              <span className="text-muted">
+                {' '}Subscription {sub.status.replace('_', ' ')}
+                {paying && sub.nextBillingAt ? `, ${sub.cancelAtPeriodEnd ? 'ends' : 'renews'} ${dateOf(sub.nextBillingAt)}` : ''}.
+              </span>
+            )}
+          </p>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            {billing.plans.map((p) => (
+              <div key={p.id} className={`border px-4 py-3 ${p.id === currentPlan.id ? 'border-accent' : 'border-edge'}`}>
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-[14px] font-semibold text-text">{p.name}</span>
+                  <span className="font-mono text-[12px] text-muted">{priceLabel(p)}</span>
+                </div>
+                <ul className="mt-2 space-y-0.5 text-[12px] text-muted">
+                  {planFacts(p).map((f) => (
+                    <li key={f}>{f}</li>
+                  ))}
+                </ul>
+                {p.purchasable && p.id !== currentPlan.id && !paying && (
+                  <ActionForm action={startCheckout.bind(null, p.id)} submit={`Upgrade to ${p.name}`} className="mt-3" />
+                )}
+              </div>
+            ))}
+          </div>
+          {sub?.manageable && (
+            <ActionForm action={openBillingPortal} submit="Manage billing" tone="quiet" className="mt-4" />
+          )}
+          <p className="mt-3 text-[11px] text-dim">
+            Upgrades, payment details and cancellation are owners only. Cancelling keeps the plan until the end of the period that was paid for. See the <a href="/refunds" className="underline-offset-4 hover:underline">refund policy</a>.
+          </p>
+        </Panel>
+      </section>
 
       <Panel title="Connected by install" subtitle="GitHub and Slack">
         <ul className="space-y-1 font-mono text-[11px] text-muted">
@@ -111,6 +174,23 @@ export default async function SettingsPage() {
           </Field>
           <Field label="Application key" hint="Needs read access to monitors, metrics and logs.">
             <input name="appKey" type="password" autoComplete="off" className={INPUT} />
+          </Field>
+        </ActionForm>
+      </Section>
+
+      <Section id="sentry" title="Sentry" subtitle="an alternative alert source: new and regressed issues" status={i.sentry} provider="sentry">
+        <ActionForm action={saveSentry} submit="Save Sentry" className="space-y-3">
+          <Field label="Sentry URL" hint="https://sentry.io, or your region's host (https://us.sentry.io, https://de.sentry.io).">
+            <input name="baseUrl" defaultValue={i.sentry.baseUrl ?? 'https://sentry.io'} className={INPUT} />
+          </Field>
+          <Field label="Organization slug">
+            <input name="organization" defaultValue={sentryOrg} required className={INPUT} placeholder="acme" />
+          </Field>
+          <Field label="Auth token" hint={i.sentry.configured ? 'Leave blank to keep the stored token. Needs event:read and project:read.' : 'Needs event:read and project:read.'}>
+            <input name="token" type="password" autoComplete="off" className={INPUT} />
+          </Field>
+          <Field label="Webhook client secret" hint="Optional. With it, Sentry's issue webhooks (to /webhooks/sentry on the API) wake the poll at once.">
+            <input name="webhookSecret" type="password" autoComplete="off" className={INPUT} />
           </Field>
         </ActionForm>
       </Section>

@@ -17,7 +17,7 @@
     "db:push": "pnpm --filter @pager/db push",
     "db:seed": "pnpm --filter @pager/db seed",
     "dev": "pnpm --parallel --filter './apps/**' dev",
-    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm build",
+    "verify": "pnpm -r --filter './packages/**' build && pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "preflight": "pnpm --filter @pager/evals preflight",
     "demo:phase1": "pnpm --filter @pager/evals phase1",
     "demo:local": "pnpm --filter @pager/evals local",
@@ -28,7 +28,11 @@
     "demo:repo": "cd demo/checkout-api && node --test",
     "eval:agent": "pnpm --filter @pager/evals eval:agent",
     "probe:datadog": "pnpm --filter @pager/evals probe:datadog",
-    "db:migrate": "pnpm --filter @pager/db migrate"
+    "db:migrate": "pnpm --filter @pager/db migrate",
+    "demo:e2e": "pnpm --filter @pager/evals e2e",
+    "launch:check": "node --experimental-strip-types --no-warnings evals/src/launch-check.ts",
+    "bench": "pnpm --filter @pager/evals bench",
+    "test:contract": "vitest run --config vitest.contract.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

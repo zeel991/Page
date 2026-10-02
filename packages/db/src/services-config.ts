@@ -6,7 +6,7 @@ import { integrations, repositories, services } from './schema.js';
 export type ServiceRow = typeof services.$inferSelect;
 export type IntegrationRow = typeof integrations.$inferSelect;
 
-export type IntegrationProvider = 'datadog' | 'notion' | 'resend' | 'anthropic';
+export type IntegrationProvider = 'datadog' | 'sentry' | 'notion' | 'resend' | 'anthropic';
 
 /**
  * Per-workspace integration settings (never secrets — those are in the vault) and

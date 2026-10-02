@@ -95,7 +95,7 @@ describe('database schema', () => {
       db.insert(evidence).values({
         organizationId: org!.id,
         incidentId: inc!.id,
-        kind: 'DATADOG_LOG',
+        kind: 'OBS_LOG',
         provenance: 'OBSERVED',
         summary: 'invented',
         // A tool call id that was never issued.
@@ -173,6 +173,10 @@ describe('migrations', () => {
     await q(`insert into agent_runs (id, incident_id, agent_name, status, started_at) values ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000d1', 'A', 'OK', now()), ('00000000-0000-0000-0000-0000000000e2', null, 'Watcher', 'OK', now())`);
     await q(`insert into tool_calls (id, agent_run_id, tool_name, status, duration_ms, started_at) values ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000e2', 't', 'OK', 1, now())`);
     await q(`insert into evidence (incident_id, kind, provenance, summary, source_tool_call_id) values ('00000000-0000-0000-0000-0000000000d1', 'K', 'OBSERVED', 's', '00000000-0000-0000-0000-0000000000f1')`);
+    // Evidence named for its vendor, from before the kinds were neutral.
+    for (const kind of ['DATADOG_MONITOR', 'DATADOG_LOG', 'DATADOG_METRIC']) {
+      await q(`insert into evidence (incident_id, kind, provenance, summary, source_tool_call_id) values ('00000000-0000-0000-0000-0000000000d1', '${kind}', 'OBSERVED', 's', '00000000-0000-0000-0000-0000000000f1')`);
+    }
 
     await migrate(h);
     const one = async (s: string) => (await h.pglite!.query<Record<string, unknown>>(s)).rows;
@@ -183,6 +187,13 @@ describe('migrations', () => {
       const rows = await one(`select distinct organization_id from ${table}`);
       expect(rows).toEqual([{ organization_id: '00000000-0000-0000-0000-00000000000a' }]);
     }
+    // Vendor-named evidence becomes neutral, keeping which vendor it came from.
+    expect(await one(`select kind, backend from evidence order by kind`)).toEqual([
+      { kind: 'K', backend: null },
+      { kind: 'OBS_ALERT', backend: 'datadog' },
+      { kind: 'OBS_LOG', backend: 'datadog' },
+      { kind: 'OBS_METRIC', backend: 'datadog' },
+    ]);
     await h.close();
   });
 

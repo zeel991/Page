@@ -1,9 +1,10 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
 import type { SourceControlProvider } from '@pager/providers';
 import { ProtectedPathError, protectedPathReason } from './patch-policy.js';
-import { LocalProcessRunner, type CommandResult, type SandboxRunner } from './runner.js';
+import { LocalProcessRunner, runProcess, type CommandResult, type SandboxRunner } from './runner.js';
 
 export type { CommandResult } from './runner.js';
 
@@ -57,6 +58,8 @@ export interface SandboxOptions {
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT = 1_000_000;
+const CLONE_TIMEOUT_MS = 180_000;
+const SKIPPED_DIRS = new Set(['.git', 'node_modules', '.venv', 'venv', '__pycache__', '.pytest_cache']);
 
 export class Sandbox {
   readonly runner: SandboxRunner;
@@ -73,48 +76,72 @@ export class Sandbox {
   }
 
   /**
-   * Materialise a repository at an exact revision.
+   * Materialise a repository at an exact revision: a shallow, blob-filtered git
+   * clone of that one commit.
    *
-   * Files are fetched through the source control provider rather than cloned with
-   * git, so the same path works against a twin and against real GitHub, and no
-   * credential is ever written into a `.git/config` on disk.
+   * A clone rather than one API read per file: it is one round trip instead of
+   * hundreds, it is byte-exact (binary files survive, where decoding every file as
+   * UTF-8 corrupted them), and it cannot silently come back partial the way a
+   * truncated listing could. Git runs on this host — no repository code runs at this
+   * stage — with the credential in its environment only (`gitAuthEnvironment`), never
+   * in the URL, argv or `.git/config`, and with no user or system git config.
    */
   static async create(
-    provider: SourceControlProvider,
+    provider: Pick<SourceControlProvider, 'cloneUrl' | 'gitAuthEnvironment'>,
     repo: string,
     revision: string,
     opts: SandboxOptions = {},
   ): Promise<Sandbox> {
+    const sandbox = await Sandbox.empty(revision, opts);
+    try {
+      const env = {
+        PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+        HOME: join(sandbox.root, 'home'),
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: devNull,
+        ...(await provider.gitAuthEnvironment()),
+      };
+      const git = async (args: string[], timeoutMs = CLONE_TIMEOUT_MS): Promise<CommandResult> => {
+        const result = await runProcess(spawn, 'git', args, { cwd: sandbox.dir, env, timeoutMs, maxOutputBytes: 200_000 });
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `Cannot build a sandbox: \`git ${args[0]}\` of ${repo}@${revision} failed (exit ${result.exitCode}` +
+              `${result.timedOut ? ', timed out' : ''}): ${result.stderr.trim().slice(0, 500) || 'no output'}`,
+          );
+        }
+        return result;
+      };
+      await git(['init', '-q']);
+      await git(['remote', 'add', 'origin', provider.cloneUrl(repo)]);
+      await git(['fetch', '-q', '--no-tags', '--depth', '1', '--filter=blob:none', 'origin', revision]);
+      await git(['-c', 'advice.detachedHead=false', 'checkout', '-q', 'FETCH_HEAD']);
+      const head = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+      // A tree that is not the pinned one would reproduce against the wrong code.
+      if (/^[0-9a-f]{40}$/i.test(revision) && head.toLowerCase() !== revision.toLowerCase()) {
+        throw new Error(`Cannot build a sandbox: asked for ${revision} but the clone checked out ${head}.`);
+      }
+      return sandbox;
+    } catch (err) {
+      await sandbox.dispose();
+      throw err;
+    }
+  }
+
+  /** A sandbox holding exactly these files. For tests and scripted fixtures. */
+  static async fromFiles(files: Readonly<Record<string, string>>, revision: string, opts: SandboxOptions = {}): Promise<Sandbox> {
+    const sandbox = await Sandbox.empty(revision, opts);
+    for (const [path, content] of Object.entries(files)) await sandbox.writeFile(path, content);
+    return sandbox;
+  }
+
+  private static async empty(revision: string, opts: SandboxOptions): Promise<Sandbox> {
     const parent = opts.rootDir ?? tmpdir();
     await mkdir(parent, { recursive: true });
     const root = await mkdtemp(join(parent, 'pager-sandbox-'));
     // Home and temp are siblings of the working copy, not inside it, so a test
     // runner discovering files in the repository never finds them.
     await Promise.all(['work', 'home', 'tmp'].map((d) => mkdir(join(root, d))));
-    const sandbox = new Sandbox(root, join(root, 'work'), revision, opts);
-
-    const listing = await provider.listFiles(repo, revision);
-    if (listing.truncated) {
-      // A sandbox missing files would test a tree that is not the failing one.
-      throw new Error(
-        `Cannot build a sandbox: the provider listed only part of ${repo}@${revision}. ` +
-          `Refusing to run against an incomplete working copy.`,
-      );
-    }
-    const paths = listing.paths;
-    if (paths.length === 0) {
-      throw new Error(
-        `Cannot build a sandbox: ${repo}@${revision} reported no files. ` +
-          `Refusing to run against an empty working copy.`,
-      );
-    }
-
-    for (const path of paths) {
-      const content = await provider.getFile(repo, revision, path);
-      if (content === null) continue;
-      await sandbox.writeFile(path, content);
-    }
-    return sandbox;
+    return new Sandbox(root, join(root, 'work'), revision, opts);
   }
 
   /** Resolve a repo-relative path, refusing anything that escapes the sandbox. */
@@ -162,6 +189,36 @@ export class Sandbox {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw err;
     }
+  }
+
+  /** Names in a repository directory, or [] when it does not exist. */
+  async listDir(path: string): Promise<string[]> {
+    try {
+      return (await readdir(this.safePath(path), { withFileTypes: true })).map((d) => (d.isDirectory() ? `${d.name}/` : d.name));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') return [];
+      throw err;
+    }
+  }
+
+  /**
+   * Every file in the working copy, repository-relative. Installed dependencies and
+   * git's own metadata are not the repository's files and are skipped.
+   */
+  async listFiles(): Promise<string[]> {
+    const out: string[] = [];
+    const walk = async (rel: string): Promise<void> => {
+      for (const entry of await readdir(rel ? join(this.dir, rel) : this.dir, { withFileTypes: true })) {
+        const path = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          if (!SKIPPED_DIRS.has(entry.name)) await walk(path);
+        } else if (entry.isFile()) {
+          out.push(path);
+        }
+      }
+    };
+    await walk('');
+    return out.sort();
   }
 
   async deleteFile(path: string): Promise<void> {

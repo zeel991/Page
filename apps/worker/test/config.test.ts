@@ -2,7 +2,12 @@ import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { WorkerConfigError, describeConfig, loadConfig } from '../src/config.ts';
 
-const BASE = { DATABASE_URL: 'postgres://pager@db/pager', PAGER_MASTER_KEY: randomBytes(32).toString('base64') };
+const BASE = {
+  DATABASE_URL: 'postgres://pager@db/pager',
+  PAGER_MASTER_KEY: randomBytes(32).toString('base64'),
+  PAGER_SANDBOX_RUNNER: 'docker',
+  PAGER_SANDBOX_IMAGE: 'pager-sandbox:latest',
+};
 const load = (env: Record<string, string>) => () => loadConfig({ ...BASE, ...env });
 
 describe('worker configuration', () => {
@@ -24,14 +29,30 @@ describe('worker configuration', () => {
     expect(load({ PAGER_WORKER_CONCURRENCY: value })).toThrow(/PAGER_WORKER_CONCURRENCY/);
   });
 
-  it('runs repository code locally by default, and says it is development only', () => {
-    const config = loadConfig(BASE);
-    expect(config.sandbox).toEqual({ runner: 'local' });
-    expect(describeConfig(config)).toMatch(/LOCAL PROCESS — DEVELOPMENT ONLY/);
+  // Repository code under the local runner can read the worker's own environment,
+  // and with it every workspace's secrets. Before, an unset runner against a real
+  // database started without complaint.
+  it('refuses the local sandbox against a real database unless every workspace is trusted', () => {
+    expect(load({ PAGER_SANDBOX_RUNNER: '' })).toThrow(/could read its credentials/);
+    expect(load({ PAGER_SANDBOX_RUNNER: 'local' })).toThrow(/PAGER_ALLOW_LOCAL_SANDBOX=1/);
+    const trusted = loadConfig({ ...BASE, PAGER_SANDBOX_RUNNER: 'local', PAGER_ALLOW_LOCAL_SANDBOX: '1' });
+    expect(trusted.sandbox).toEqual({ runner: 'local', root: undefined });
+    expect(describeConfig(trusted)).toMatch(/LOCAL PROCESS — TRUSTED WORKSPACES ONLY/);
   });
 
-  it('selects the docker sandbox, and refuses an unknown runner', () => {
-    expect(loadConfig({ ...BASE, PAGER_SANDBOX_RUNNER: 'docker' }).sandbox).toEqual({ runner: 'docker', image: 'node:22-bookworm-slim' });
+  it('runs locally against an in-process development database', () => {
+    const config = loadConfig({ ...BASE, DATABASE_URL: 'pglite://memory', PAGER_SANDBOX_RUNNER: '' });
+    expect(config.sandbox.runner).toBe('local');
+  });
+
+  it('selects the docker sandbox with its image, runtime and root, and refuses an unknown runner', () => {
+    expect(loadConfig({ ...BASE, PAGER_SANDBOX_DOCKER_RUNTIME: 'runsc', PAGER_SANDBOX_ROOT: '/var/lib/pager/sandboxes' }).sandbox).toEqual({
+      runner: 'docker',
+      image: 'pager-sandbox:latest',
+      runtime: 'runsc',
+      root: '/var/lib/pager/sandboxes',
+    });
+    expect(load({ PAGER_SANDBOX_IMAGE: '' })).toThrow(/PAGER_SANDBOX_IMAGE is required/);
     expect(load({ PAGER_SANDBOX_RUNNER: 'chroot' })).toThrow(/PAGER_SANDBOX_RUNNER/);
   });
 

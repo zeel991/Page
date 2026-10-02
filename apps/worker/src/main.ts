@@ -13,13 +13,15 @@
  *  - It never merges and never deploys. The only production-affecting act in the
  *    whole system is a person merging the pull request it opened.
  */
+import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
+import { promisify } from 'node:util';
 import { LocalKeyWrapper, redactSecrets, registerSecret } from '@pager/core';
 import { CredentialVault, JobQueue, PlanRepository, UsageRepository, createDatabase, isPgliteUrl, migrate } from '@pager/db';
 import { githubAppFromEnv } from '@pager/providers';
 import { AnthropicModel, IncidentInvestigator, MeteredModel, ModelPatchGenerator } from '@pager/agents';
 import { usageMeter } from './meter.ts';
-import { DockerRunner, LocalProcessRunner } from '@pager/sandbox';
+import { DirectoryDependencyCache, DockerRunner, LocalProcessRunner } from '@pager/sandbox';
 import { describeConfig, loadConfig } from './config.ts';
 import type { JobContext } from './jobs.ts';
 import { handleSlackInteraction } from './merge-endpoint.ts';
@@ -39,6 +41,20 @@ async function main(): Promise<void> {
   registerSecret(github.config.clientSecret);
   registerSecret(github.config.webhookSecret);
   log(`Pager Developer worker starting\n  ${describeConfig(config)}`);
+
+  const sandboxRunner =
+    config.sandbox.runner === 'docker'
+      ? new DockerRunner({ image: config.sandbox.image, ...(config.sandbox.runtime ? { runtime: config.sandbox.runtime } : {}) })
+      : new LocalProcessRunner();
+  if (config.sandbox.runner === 'docker') {
+    const image = config.sandbox.image;
+    // A missing image or an unreachable daemon would otherwise surface as every
+    // incident's install failing with "not available in the sandbox".
+    await promisify(execFile)('docker', ['image', 'inspect', '--format', '{{.Id}}', image], { timeout: 30_000 }).catch((err: Error) => {
+      throw new Error(`The docker sandbox is configured but image ${image} is not usable on this host: ${err.message}`);
+    });
+  }
+  log(`sandbox: ${sandboxRunner.description}`);
 
   const handle = await createDatabase(config.databaseUrl);
   // Migrations are a release step against Postgres. An in-process development
@@ -65,7 +81,9 @@ async function main(): Promise<void> {
       ...(config.resendBaseUrl ? { resendBaseUrl: config.resendBaseUrl } : {}),
     },
     queue,
-    sandboxRunner: config.sandbox.runner === 'docker' ? new DockerRunner({ image: config.sandbox.image }) : new LocalProcessRunner(),
+    sandboxRunner,
+    ...(config.sandbox.root ? { sandboxRoot: config.sandbox.root } : {}),
+    dependencyCache: new DirectoryDependencyCache(config.dependencyCacheDir),
     // A workspace's own key when it brought one; otherwise the operator's, if any.
     // With neither, the workflow still detects, files and reports, and stops short of
     // a patch, saying why.
@@ -125,7 +143,8 @@ async function main(): Promise<void> {
     }
     if (path === '/health') {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ status: 'ok', service: 'pager-developer-worker' }));
+      // The sandbox kind is public so a launch check can confirm isolation is on.
+      response.end(JSON.stringify({ status: 'ok', service: 'pager-developer-worker', sandbox: sandboxRunner.kind }));
       return;
     }
     if (path === '/status') {

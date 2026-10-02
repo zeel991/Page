@@ -136,6 +136,13 @@ export class Http {
     return this.request<T>('DELETE', this.url(path));
   }
 
+  /** GET, with the response headers: for APIs that paginate through them (Link). */
+  async getPage<T>(path: string, query?: Record<string, string | number | undefined>): Promise<{ body: T; headers: Headers }> {
+    let headers = new Headers();
+    const body = await this.request<T>('GET', this.url(path, query), undefined, (h) => (headers = h));
+    return { body, headers };
+  }
+
   /** GET returning null on 404, for genuinely optional resources. */
   async getOptional<T>(path: string, query?: Record<string, string | number | undefined>): Promise<T | null> {
     try {
@@ -163,7 +170,7 @@ export class Http {
    * twice. Waits honour what the vendor asked for; a wait longer than the cap
    * fails now rather than stalling the incident for an hour.
    */
-  private async request<T>(method: string, url: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, url: string, body?: unknown, onHeaders?: (h: Headers) => void): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       const last = attempt >= this.retries;
       let res: Response;
@@ -174,7 +181,10 @@ export class Http {
         await this.sleep(backoff(attempt));
         continue;
       }
-      if (res.ok) return await parse<T>(res);
+      if (res.ok) {
+        onHeaders?.(res.headers);
+        return await parse<T>(res);
+      }
 
       const retryable = refusedUnprocessed(res) || (IDEMPOTENT.has(method) && TRANSIENT.has(res.status));
       if (retryable && !last) {

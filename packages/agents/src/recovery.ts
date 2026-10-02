@@ -1,4 +1,4 @@
-import type { MetricName, ObservabilityProvider, TimeRange } from '@pager/providers';
+import type { AlertSource, MetricName, ObservabilityProvider, TimeRange } from '@pager/providers';
 import type { AgentRunContext } from '@pager/observability';
 import { mean } from './regression-detector.js';
 
@@ -167,12 +167,17 @@ export function unmeasuredRecovery(summary: string): RecoveryVerification {
 }
 
 export class RecoveryVerifier {
-  constructor(private readonly observability: ObservabilityProvider) {}
+  constructor(
+    private readonly observability: ObservabilityProvider,
+    /** Whose alerts decide "still firing". Defaults to the metrics backend's monitors. */
+    private readonly alerts: Pick<AlertSource, 'backend' | 'listAlerts'> | null = null,
+  ) {}
 
   private async checkMonitors(ctx: AgentRunContext, service: string): Promise<boolean | null> {
     try {
-      const res = await ctx.tool('datadog.listMonitors', { service }, () =>
-        this.observability.listMonitors(service),
+      const backend = this.alerts?.backend ?? this.observability.backend;
+      const res = await ctx.tool('observability.listAlerts', { backend, service }, () =>
+        this.alerts ? this.alerts.listAlerts(service) : this.observability.listMonitors(service),
       );
       // Any monitor still firing contradicts recovery; one in a state we do not
       // model means we cannot tell.
@@ -198,7 +203,7 @@ export class RecoveryVerifier {
           (['baseline', 'incident', 'post'] as const).map(async (label, i) => {
             const range = [input.baselineWindow, input.incidentWindow, input.postRemediationWindow][i]!;
             const res = await ctx.tool(
-              'datadog.queryMetric',
+              'observability.queryMetric',
               { service: input.service, metric, window: label },
               () => this.observability.queryMetric(input.service, metric, range),
             );
@@ -285,7 +290,7 @@ export class RecoveryVerifier {
   private async countRequests(ctx: AgentRunContext, input: RecoveryInput): Promise<number | null> {
     try {
       const res = await ctx.tool(
-        'datadog.queryMetric',
+        'observability.queryMetric',
         { service: input.service, metric: 'request_throughput', window: 'post' },
         () => this.observability.queryMetric(input.service, 'request_throughput', input.postRemediationWindow),
       );

@@ -28,6 +28,11 @@ export class PlanRepository {
     return row.plan;
   }
 
+  /** Every plan, cheapest limits first, for a pricing page. */
+  async all(): Promise<PlanRow[]> {
+    return (await this.db.select().from(plans)).sort((a, b) => a.maxServices - b.maxServices);
+  }
+
   async servicesUsed(organizationId: string): Promise<number> {
     const [row] = rowsOf<{ n: number }>(
       await this.db.execute(sql`select count(*)::int as n from services where organization_id = ${organizationId} and alert_source <> 'sample'`),
