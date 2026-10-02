@@ -38,6 +38,8 @@ export interface AppDeps {
    * Only set it when a proxy is in front: otherwise a caller could claim any address.
    */
   trustProxy?: boolean;
+  /** The clock the console's month-to-date figures use. Tests set it; production leaves it. */
+  now?: () => Date;
   /** Dodo Payments, for paid plans. Null: only the free plan, and the console says so. */
   billing?: DodoBillingConfig | null;
 }
@@ -83,6 +85,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       github: deps.github ?? null,
       slack: deps.slack?.client ?? null,
       ...(deps.configPolicy ? { policy: deps.configPolicy } : {}),
+      ...(deps.now ? { now: deps.now } : {}),
     });
   });
   // Callers that are not the console: authenticated by their own signatures.

@@ -64,7 +64,8 @@ let clock: Date;
 const now = () => clock;
 
 beforeEach(async () => {
-  h = await harness();
+  // The API reports spend by the same clock the worker judges it by.
+  h = await harness({ now });
   const repo = h.twin.current.repositories.get('acme/checkout-api')!;
   deployed = repo.branches.get('main')!;
   health = await healthServer(() => deployed);

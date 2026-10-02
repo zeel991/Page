@@ -59,6 +59,8 @@ export interface ConfigRouteDeps {
   github: GitHubAppClient | null;
   slack: SlackAppClient | null;
   policy?: ConfigPolicy;
+  /** The clock month-to-date spend is counted by; the wall clock unless a test sets one. */
+  now?: () => Date;
 }
 
 const Datadog = z.object({
@@ -242,7 +244,8 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
   const usage = new UsageRepository(deps.db);
   app.get('/api/usage', async (request) => {
     const o = org(request);
-    const [monthToDate, byKind, budget] = await Promise.all([usage.monthToDate(o), usage.byKind(o), usage.budget(o)]);
+    const at = deps.now?.() ?? new Date();
+    const [monthToDate, byKind, budget] = await Promise.all([usage.monthToDate(o, at), usage.byKind(o, at), usage.budget(o)]);
     return { monthToDate, byKind, monthlyBudgetUsd: budget };
   });
 
