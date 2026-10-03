@@ -36,9 +36,9 @@ GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App*
 | Field | Value |
 | --- | --- |
 | Homepage URL | `CONSOLE` |
-| Callback URL | `CONSOLE/api/auth/callback/github` |
+| Callback URLs, **in this order** | 1. `CONSOLE/onboarding/github/setup` 2. `CONSOLE/api/auth/callback/github` |
 | Request user authorization (OAuth) during installation | **on** (the install is proven with it) |
-| Setup URL | `CONSOLE/onboarding/github/setup` |
+| Setup URL | unavailable once the option above is on: GitHub sends an installer to the **first** callback URL instead, which is why the setup route comes first. Sign-in names its own callback, so it is unaffected. |
 | Webhook URL | `API/webhooks/github`, with a generated secret |
 | Repository permissions | Contents, Pull requests, Checks, Issues, Commit statuses: read & write. Metadata: read |
 | Account permissions | Email addresses: read |
