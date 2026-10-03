@@ -132,6 +132,16 @@ describe('database schema', () => {
 });
 
 describe('migrations', () => {
+  // Open sign-up with an included amount let every new free account spend the
+  // operator's model key. Before 0012 the free plan included $5.
+  it('gives the free plan no included model spend, and keeps the paid plan’s', async () => {
+    const h = await createDatabase('pglite://memory');
+    await migrate(h);
+    const rows = (await h.pglite!.query<{ id: string; usd: number | null }>('select id, included_model_usd as usd from plans order by id')).rows;
+    expect(rows).toEqual([{ id: 'free', usd: null }, { id: 'team', usd: 200 }]);
+    await h.close();
+  });
+
   const tableExists = async (h: Awaited<ReturnType<typeof createDatabase>>, name: string) =>
     (await h.pglite!.query<{ t: string | null }>(`select to_regclass('public.${name}')::text as t`)).rows[0]!.t !== null;
 

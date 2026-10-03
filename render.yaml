@@ -1,36 +1,34 @@
-# Pager Developer on Render: the API and Postgres. The console deploys to Vercel and
-# the worker to a Docker host (deploy/worker); docs/launch.md is the whole sequence.
+# Pager Developer on Render: the API, on Render's free instance type.
 #
-# Everything a workspace configures (repositories, Datadog, Slack, services) lives in
-# the database and is set from the console. What is set here is the operator's: the
-# GitHub App, the Slack app, the shared secrets, and optionally a fallback model key.
-# `sync: false` values are asked for when the Blueprint is first applied; every name
-# is documented in .env.example.
+# The free beta costs nothing to host:
+#   - console   Vercel (Hobby)                  apps/web
+#   - API       here, free web service           spins down after 15 idle minutes; an
+#                                                uptime monitor on /health keeps it awake
+#                                                (one service uses ~744 of the 750 free
+#                                                instance hours a month)
+#   - database  Neon's free plan                 Render's free Postgres expires after 30 days
+#   - worker    a machine you own, with Docker   deploy/worker
+# docs/launch.md is the whole sequence.
 #
-# Migrations run once per API deploy, before it starts (preDeployCommand). The worker
-# does not migrate: deploy the API first when a release adds one. docs/launch.md is
-# the whole sequence.
+# Everything a workspace configures lives in the database and is set from the console.
+# What is set here is the operator's: the database URL, the GitHub App, the Slack app
+# and the shared secrets. `sync: false` values are asked for when the Blueprint is
+# first applied; every name is documented in .env.example.
+#
+# Free web services have no pre-deploy step, so migrations run as the API starts
+# (a no-op when there is nothing new). The worker does not migrate.
 
 envVarGroups:
-  # Generated once and shared. PAGER_SESSION_SECRET must be identical in the console
-  # (copy it to Vercel) and the API; PAGER_MASTER_KEY in the API and the worker (it unwraps tenant
-  # secrets), so copy it into the worker host's worker.env. Render generates 256
-  # random bits, base64 — the 32 bytes the key needs.
+  # Generated once. PAGER_SESSION_SECRET must be identical in the console (copy it to
+  # Vercel) and the API; PAGER_MASTER_KEY in the API and the worker (it unwraps tenant
+  # secrets), so copy it into the worker's worker.env. Render generates 256 random
+  # bits, base64: the 32 bytes the key needs.
   - name: pager-secrets
     envVars:
       - key: PAGER_SESSION_SECRET
         generateValue: true
       - key: PAGER_MASTER_KEY
         generateValue: true
-
-databases:
-  - name: pager-db
-    postgresMajorVersion: "17"
-    # Reachable from this account's services and, once added, the worker host only:
-    #   ipAllowList:
-    #     - source: <worker host IP>/32
-    #       description: pager worker
-    ipAllowList: []
 
 services:
   # ── Console ──────────────────────────────────────────────────────────────────
@@ -40,18 +38,17 @@ services:
   - type: web
     name: pager-api
     runtime: node
+    plan: free
     buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm -r --filter './packages/**' build
-    preDeployCommand: pnpm db:migrate
-    startCommand: pnpm --filter @pager/api start
+    startCommand: pnpm db:migrate && pnpm --filter @pager/api start
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
         value: "24"
       - fromGroup: pager-secrets
+      # Neon's connection string (it includes sslmode=require).
       - key: DATABASE_URL
-        fromDatabase:
-          name: pager-db
-          property: connectionString
+        sync: false
       - key: PAGER_API_HOST
         value: 0.0.0.0
       - key: LOG_LEVEL
@@ -79,19 +76,11 @@ services:
         sync: false
       - key: SLACK_CLIENT_SECRET
         sync: false
-      # Paid plans (Dodo Payments). Webhook URL: <this service>/webhooks/dodo.
-      - key: DODO_PAYMENTS_API_KEY
-        sync: false
-      - key: DODO_PAYMENTS_WEBHOOK_SECRET
-        sync: false
-      # test_mode until the Dodo business is approved for live payments.
-      - key: DODO_PAYMENTS_ENVIRONMENT
-        value: test_mode
-      - key: DODO_PRODUCT_TEAM
-        sync: false
+      # Paid plans are off in the free beta. To turn them on later, add
+      # DODO_PAYMENTS_API_KEY, DODO_PAYMENTS_WEBHOOK_SECRET, DODO_PAYMENTS_ENVIRONMENT
+      # and DODO_PRODUCT_TEAM here (docs/launch.md, "Taking payments"), and move the
+      # console off Vercel Hobby, which is for non-commercial use only.
 
   # ── Worker ───────────────────────────────────────────────────────────────────
-  # Not on Render. The worker runs repository code, and open sign-up needs that code
-  # in containers, which need a Docker daemon Render does not offer. It runs on a
-  # Docker host instead: deploy/worker/compose.yaml. Add that host's IP to pager-db's
-  # ipAllowList above so it can reach the database.
+  # Not on Render: it runs repository code in Docker containers and must stay up to
+  # poll; a free web service has no Docker. deploy/worker runs it.

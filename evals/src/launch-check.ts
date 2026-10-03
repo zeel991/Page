@@ -1,7 +1,11 @@
 /**
  * Is a deployment ready for open sign-up? Asks the running services, from outside.
  *
- *   pnpm launch:check --console https://… --api https://… --worker https://…
+ *   pnpm launch:check --console https://… --api https://… [--worker https://…] [--payments]
+ *
+ * Without --payments it checks a free beta: no billing expected. With it, billing
+ * must be on and every paid plan priced. A worker on a machine with no public address
+ * cannot be checked from outside; leave --worker off and its checks are skipped.
  *
  * Read-only: GETs, and POSTs that carry no signature and must be refused. It sends
  * no credential and needs none, so it reads no .env. Every check says what it saw.
@@ -33,7 +37,7 @@ async function get(url: string, init: RequestInit = {}): Promise<{ status: numbe
 
 const seen = (r: Awaited<ReturnType<typeof get>>) => ('error' in r ? `unreachable: ${r.error}` : `${r.status}`);
 
-export async function launchChecks(urls: { console: string; api: string; worker: string | null }): Promise<Check[]> {
+export async function launchChecks(urls: { console: string; api: string; worker: string | null }, opts: { payments: boolean } = { payments: false }): Promise<Check[]> {
   const checks: Check[] = [];
   const add = (name: string, ok: boolean, saw: string, advisory = false) => checks.push({ name, ok, saw, ...(advisory ? { advisory } : {}) });
 
@@ -63,8 +67,14 @@ export async function launchChecks(urls: { console: string; api: string; worker:
       add('console: support address is set (PAGER_SUPPORT_EMAIL)', body.includes('mailto:'), body.includes('mailto:') ? 'set' : 'unset');
     }
     if (page === '/pricing' && body) {
-      const price = /\$\d+(?:\.\d\d)? \/ \w+/i.exec(body.replace(/<!-- -->/g, ''))?.[0];
-      add('console: pricing shows a paid plan’s price', Boolean(price), price ?? (/Price unavailable|could not be loaded/.test(body) ? 'price unavailable' : 'no price found'));
+      const text = body.replace(/<!-- -->/g, '');
+      if (opts.payments) {
+        const price = /\$\d+(?:\.\d\d)? \/ \w+/i.exec(text)?.[0];
+        add('console: pricing shows a paid plan’s price', Boolean(price), price ?? (/Price unavailable|could not be loaded/.test(text) ? 'price unavailable' : 'no price found'));
+      } else {
+        const loaded = !/could not be loaded/.test(text);
+        add('console: pricing loads the plans from the API', loaded, loaded ? 'loaded' : 'could not be loaded');
+      }
     }
   }
 
@@ -76,9 +86,13 @@ export async function launchChecks(urls: { console: string; api: string; worker:
   if (!('error' in plans) && plans.status === 200) {
     const body = JSON.parse(plans.text) as { enabled: boolean; plans: { id: string; purchasable: boolean; price: unknown }[] };
     billingEnabled = body.enabled;
-    add('api: billing is enabled (DODO_PAYMENTS_*)', body.enabled, String(body.enabled));
-    const paid = body.plans.filter((p) => p.purchasable);
-    add('api: every paid plan has a Dodo product with a price', paid.length > 0 && paid.every((p) => p.price), paid.map((p) => `${p.id}:${p.price ? 'priced' : 'no price'}`).join(', ') || 'no purchasable plan');
+    if (opts.payments) {
+      add('api: billing is enabled (DODO_PAYMENTS_*)', body.enabled, String(body.enabled));
+      const paid = body.plans.filter((p) => p.purchasable);
+      add('api: every paid plan has a Dodo product with a price', paid.length > 0 && paid.every((p) => p.price), paid.map((p) => `${p.id}:${p.price ? 'priced' : 'no price'}`).join(', ') || 'no purchasable plan');
+    } else {
+      add('api: plans answer (free beta, billing not required)', true, `billing ${body.enabled ? 'on' : 'off'}`);
+    }
   } else {
     add('api: /public/plans', false, seen(plans));
   }
@@ -103,7 +117,7 @@ export async function launchChecks(urls: { console: string; api: string; worker:
     const slack = await get(`${urls.worker}/slack/interactions`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'payload=%7B%7D' });
     add('worker: Slack interactions refuse an unsigned request', !('error' in slack) && [400, 401, 403].includes(slack.status), seen(slack), true);
   } else {
-    add('worker: URL given (--worker)', false, 'not given');
+    add('worker: not checked (no --worker; a worker on a private machine has no public URL)', false, 'skipped', true);
   }
   return checks;
 }
@@ -115,7 +129,7 @@ async function main(): Promise<void> {
     console.error('usage: pnpm launch:check --console <url> --api <url> [--worker <url>]');
     process.exit(2);
   }
-  const checks = await launchChecks({ console: consoleUrl, api, worker: arg('worker') });
+  const checks = await launchChecks({ console: consoleUrl, api, worker: arg('worker') }, { payments: process.argv.includes('--payments') });
   const width = Math.max(...checks.map((c) => c.name.length));
   for (const c of checks) console.log(`${c.ok ? 'PASS' : c.advisory ? 'WARN' : 'FAIL'}  ${c.name.padEnd(width)}  ${c.saw}`);
   const failed = checks.filter((c) => !c.ok && !c.advisory);

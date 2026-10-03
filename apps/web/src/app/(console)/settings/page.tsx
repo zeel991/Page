@@ -5,7 +5,7 @@ import { ActionForm } from '@/components/console/action-form';
 import { Field, INPUT } from '@/components/console/fields';
 import { openBillingPortal, saveAnthropic, saveBudget, saveDatadog, saveNotion, saveResend, saveSentry, startCheckout, testIntegration } from '../actions';
 import { NOTICES } from '@/lib/notices';
-import { planFacts, priceLabel, type PlanOffer } from '@/lib/pricing';
+import { offeredPlans, planFacts, priceLabel, type PlanOffer } from '@/lib/pricing';
 
 export const dynamic = 'force-dynamic';
 
@@ -107,7 +107,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       )}
 
       <section id="billing">
-        <Panel title="Plan and billing" subtitle={billing.enabled ? `payments by Dodo Payments${billing.mode === 'test_mode' ? ' · TEST MODE: no real charges' : ''}` : 'paid plans are not enabled on this deployment'}>
+        <Panel title="Plan and billing" subtitle={billing.enabled ? `payments by Dodo Payments${billing.mode === 'test_mode' ? ' · TEST MODE: no real charges' : ''}` : 'free beta: no paid plans yet'}>
           <p className="text-[13px] text-text">
             On the <strong>{currentPlan.name}</strong> plan.
             {sub && (
@@ -118,7 +118,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             )}
           </p>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
-            {billing.plans.map((p) => (
+            {offeredPlans(billing.plans).map((p) => (
               <div key={p.id} className={`border px-4 py-3 ${p.id === currentPlan.id ? 'border-accent' : 'border-edge'}`}>
                 <div className="flex items-baseline justify-between gap-3">
                   <span className="text-[14px] font-semibold text-text">{p.name}</span>

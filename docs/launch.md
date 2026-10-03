@@ -1,6 +1,7 @@
 # Launch runbook
 
-Everything needed to take Pager Developer from this repository to open, paid sign-up.
+Everything needed to take Pager Developer from this repository to open sign-up, as a
+**free beta that costs nothing to host**. Paid plans come later ("Taking payments").
 Each step that needs an account or a secret is yours to do; nothing here asks you to
 paste a secret anywhere but the service that holds it.
 
@@ -8,28 +9,18 @@ At the end, `pnpm launch:check` asks the running services whether they are ready
 
 ## Topology
 
-| Piece | Where | Why there |
-| --- | --- | --- |
-| Console (Next.js) | Vercel | Already deployed there |
-| API + Postgres | Render (`render.yaml`) | Migrations run before each API deploy |
-| Worker | A Linux VM with Docker (`deploy/worker`) | Open sign-up runs strangers' test suites; they must run in containers, and Render has no Docker daemon |
-| Payments | Dodo Payments | Merchant of record: they handle tax and appear on the statement |
+| Piece | Where | Cost | Limits |
+| --- | --- | --- | --- |
+| Console (Next.js) | Vercel Hobby | $0 | Non-commercial use only, which is why paid plans wait |
+| API | Render, free web service (`render.yaml`) | $0 | Spins down after 15 idle minutes; an uptime monitor on `/health` every 5 minutes keeps it up. That uses ~744 of the 750 free instance hours a month, so it must be the only free Render service |
+| Database | Neon, free plan | $0 | Render's free Postgres is deleted 30 days after creation, so not there |
+| Worker | Your Mac, with Docker Desktop (`deploy/worker/run-here.sh`) | $0 | Runs while the Mac is awake. Open sign-up runs strangers' test suites, so they run in containers |
+| Model | Each workspace's own Anthropic key | $0 to you | Free workspaces include no model spend (migration 0012) |
 
-Hostnames used below: `CONSOLE` (e.g. `https://page-iota-six.vercel.app`), `API`
-(e.g. `https://pager-api.onrender.com`) and `WORKER` (e.g. `https://worker.example.com`).
+Hostnames used below: `CONSOLE` (`https://page-iota-six.vercel.app`) and `API`
+(`https://pager-api.onrender.com`, or whatever name Render gives it).
 
-## 1. API and database on Render
-
-1. Render → **New → Blueprint** → this repository. It creates `pager-db`, `pager-api`
-   and the `pager-secrets` group (the session secret and master key are generated).
-2. Fill the `sync: false` values when asked. You can leave the GitHub, Slack and
-   Dodo values empty for now and set them after steps 2, 3 and 5:
-   - `PAGER_WEB_ORIGIN` = `CONSOLE`
-3. Once it is live, note `API`, and `curl API/health` should answer `{"status":"ok"}`.
-4. From `pager-secrets`, copy `PAGER_SESSION_SECRET` (for Vercel, step 4) and
-   `PAGER_MASTER_KEY` (for the worker, step 6).
-
-## 2. The GitHub App
+## 1. The GitHub App
 
 GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App**:
 
@@ -42,26 +33,37 @@ GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App*
 | Webhook URL | `API/webhooks/github`, with a generated secret |
 | Repository permissions | Contents, Pull requests, Checks, Issues, Commit statuses: read & write. Metadata: read |
 | Account permissions | Email addresses: read |
-| Events | Push, Pull request |
+| Events | Push, Pull request (they appear once the permissions above are set) |
 | Where can it be installed | Any account |
 
-Then generate a private key. Set on Render (`pager-api`) and in the worker's
-`worker.env`: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (the whole PEM),
-`GITHUB_APP_SLUG` (from the app's URL), `GITHUB_APP_CLIENT_ID`,
-`GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_WEBHOOK_SECRET`.
+Then generate a client secret and a private key. Keep the six values for steps 3 and
+6: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (the whole PEM), `GITHUB_APP_SLUG` (the
+end of `github.com/apps/<slug>`), `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
+`GITHUB_APP_WEBHOOK_SECRET`.
 
-## 3. The Slack app
+## 2. The database on Neon
 
-api.slack.com → **Create New App** → From scratch:
+neon.tech → sign up (the free plan) → create a project (Postgres 17, the region
+nearest Render's, e.g. US East / Oregon). Copy its **connection string**: it starts
+`postgresql://` and ends `?sslmode=require`. That is `DATABASE_URL` for steps 3 and 6.
 
-- **OAuth & Permissions**: redirect URL `CONSOLE/onboarding/slack/callback`; bot
-  scopes `chat:write`, `channels:read`, `groups:read`, `users:read`,
-  `users:read.email`.
-- **Interactivity & Shortcuts**: on, request URL `WORKER/slack/interactions`.
-- **Manage Distribution**: activate public distribution, so other workspaces can install it.
+## 3. The API on Render
 
-Set `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` on Render (`pager-api`), and
-`SLACK_SIGNING_SECRET` in `worker.env`.
+Render → **New → Blueprint** → this repository. It creates `pager-api` on the free
+instance type and the `pager-secrets` group. It should not ask for a card; if it
+does, something in the blueprint is not on the free type, so stop and say. When asked:
+
+- `DATABASE_URL`: Neon's connection string.
+- `PAGER_WEB_ORIGIN`: `CONSOLE`.
+- The six `GITHUB_APP_*` values.
+- `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`: empty for now (step 5).
+
+The API migrates the database as it starts. When it is live, `curl API/health`
+answers `{"status":"ok"}`. From **Environment Groups → pager-secrets**, copy
+`PAGER_SESSION_SECRET` (step 4) and `PAGER_MASTER_KEY` (step 6).
+
+Then point an uptime monitor (UptimeRobot's free plan: HTTP, every 5 minutes) at
+`API/health`, so the API is awake when GitHub and Slack call it.
 
 ## 4. The console on Vercel
 
@@ -79,88 +81,84 @@ Project → Settings → Environment Variables (Production):
 | `PAGER_SUPPORT_EMAIL` | a monitored support address |
 | `PAGER_LEGAL_EFFECTIVE_DATE` | optional, shown on the policies |
 
-Redeploy. The live console currently answers `/api/auth/providers` with a 500
-"server configuration" error. That is Auth.js reporting a missing `AUTH_SECRET` or
-GitHub client, and this step is what fixes it.
+Redeploy. This fixes the live console's sign-in, which answers `/api/auth/providers`
+with a 500 "server configuration" error until `AUTH_SECRET` and the GitHub client are
+set.
 
-Read `/terms`, `/privacy` and `/refunds` before going live. They describe what the
-code does, but they commit you to a 14-day refund window and 30-day deletion, and they
-have not had a lawyer's review.
+## 5. The Slack app
 
-## 5. Dodo Payments
+api.slack.com → **Create New App** → From scratch:
 
-Start in **test mode**; nothing here takes real money until step 9.
+- **OAuth & Permissions**: redirect URL `CONSOLE/onboarding/slack/callback`; bot
+  scopes `chat:write`, `channels:read`, `groups:read`, `users:read`,
+  `users:read.email`.
+- **Manage Distribution**: activate public distribution, so other workspaces can
+  install it.
+- **Interactivity**: leave off. It carries the Merge button, which exists only at
+  autonomy L4 and needs the worker at a public URL. The default, L3, opens pull
+  requests for a person to merge on GitHub.
 
-1. Create the business. **Products → New product → Subscription**: "Team", monthly,
-   at the price you want. The pricing page reads the price from this product, so
-   Dodo is the only place it is set.
-2. **Developer → API keys**: create a key. **Developer → Webhooks**: add
-   `API/webhooks/dodo`, subscribed to `subscription.*` and `payment.*`; copy its
-   signing secret (`whsec_…`).
-3. On Render (`pager-api`): `DODO_PAYMENTS_API_KEY`, `DODO_PAYMENTS_WEBHOOK_SECRET`,
-   `DODO_PRODUCT_TEAM` (the product id, `pdt_…`). Leave
-   `DODO_PAYMENTS_ENVIRONMENT=test_mode`.
-4. Optionally, check the adapter against your test account:
-   `CONTRACT_DODO_API_KEY=… CONTRACT_DODO_PRODUCT=pdt_… pnpm test:contract`.
+Set `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` on Render (`pager-api`).
 
-## 6. The worker on a Docker host
+## 6. The worker on your Mac
 
-Any Linux VM with Docker Engine and a public DNS name (`WORKER`):
+Install Docker Desktop (free for personal use and small businesses) and start it.
+Then, in this repository:
 
 ```bash
-git clone https://github.com/zeel991/Page && cd Page/deploy/worker
-cp worker.env.example worker.env        # fill it in: DATABASE_URL, PAGER_MASTER_KEY, GITHUB_APP_*, SLACK_SIGNING_SECRET, ANTHROPIC_API_KEY
-sudo install -d -o 10001 -g 10001 /var/lib/pager/sandboxes /var/lib/pager/cache
-DOCKER_GID=$(getent group docker | cut -d: -f3) WORKER_DOMAIN=worker.example.com docker compose up -d --build
+cp deploy/worker/worker.env.example deploy/worker/worker.env
+# fill in: DATABASE_URL (Neon), PAGER_MASTER_KEY, the six GITHUB_APP_* values.
+# Leave ANTHROPIC_API_KEY empty: workspaces bring their own.
+deploy/worker/run-here.sh
 ```
 
-- `DATABASE_URL` is `pager-db`'s **external** URL. Add the VM's IP to `pager-db`'s
-  access control (Render → pager-db → Networking), or it cannot connect.
-- The worker refuses to start with a local sandbox against a real database, and
-  checks at boot that the sandbox image exists. `docker compose logs worker` shows
-  `sandbox: DockerRunner (pager-sandbox:latest) …` when it is right.
-- For a kernel boundary as well, install gVisor and set
-  `PAGER_SANDBOX_DOCKER_RUNTIME=runsc`.
-- **Model spend under open sign-up:** with `ANTHROPIC_API_KEY` set, every free
-  workspace spends up to the free plan's included amount ($5 a month) on your key.
-  To make free workspaces bring their own key, set that plan's
-  `included_model_usd` to null:
-  `update plans set included_model_usd = null where id = 'free';`
+It builds the sandbox image, then runs the worker with every repository command in a
+container, and keeps the Mac from idle-sleeping while it runs. It reads only
+`worker.env`, never the repository's `.env`. The log shows
+`sandbox: DockerRunner (pager-sandbox:latest) …` when it is right. Incidents are
+picked up while it runs; when the Mac sleeps they wait, and nothing is lost.
 
 ## 7. Check
 
 ```bash
-pnpm launch:check --console CONSOLE --api API --worker WORKER
+pnpm launch:check --console CONSOLE --api API
 ```
 
 It checks that sign-in is configured, the policy pages and operator details are
-present, the pricing page shows a price, billing is enabled, anonymous and unsigned
-requests are refused, and the worker reports the Docker sandbox. Every line says what
-it saw; exit status 1 means something must be fixed.
+present, the pricing page loads the plans, and anonymous and unsigned requests are
+refused. Every line says what it saw; exit status 1 means something must be fixed.
+The worker has no public address, so it is not checked from outside.
 
-## 8. Try it yourself, in test mode
+## 8. Try it yourself
 
 Sign up at `CONSOLE`, install the GitHub App on a test repository, connect Slack and
-a monitoring source, add a service, and send the test incident from Setup. Then
-Settings → Plan and billing → **Upgrade to Team**, pay with Dodo's test card, and
-check you come back on Team. Cancel from **Manage billing**; the workspace should
-return to Free.
+a monitoring source, add your own Anthropic key under Settings → Model key, add a
+service, and send the test incident from Setup.
 
-## 9. Go live with payments
+## Taking payments, later
 
-1. Complete Dodo's business verification. They review the public site: pricing,
-   terms, privacy, refund policy and contact, linked from the footer. Those pages
-   exist; the operator name and support address must be set (step 4).
-2. Once approved, create the live-mode product, API key and webhook, the same as
-   step 5. On Render, set them and `DODO_PAYMENTS_ENVIRONMENT=live_mode`.
-3. Run `pnpm launch:check` again. The console's Plan and billing panel stops saying
-   TEST MODE.
+The billing code is in place (Dodo Payments: checkout, customer portal, signed
+webhooks), and stays off until its variables are set. Turning it on means spending
+money, so it waits for revenue:
 
-## Known limits at launch
+1. Move the console off Vercel Hobby, which is for non-commercial use only.
+2. In Dodo, test mode first: a monthly "Team" product at your price, an API key, and
+   a webhook to `API/webhooks/dodo` subscribed to `subscription.*` and `payment.*`.
+3. On Render: `DODO_PAYMENTS_API_KEY`, `DODO_PAYMENTS_WEBHOOK_SECRET`,
+   `DODO_PAYMENTS_ENVIRONMENT=test_mode`, `DODO_PRODUCT_TEAM` (the `pdt_…` id).
+4. `pnpm launch:check --console CONSOLE --api API --payments`, then buy Team with
+   Dodo's test card and cancel it from Manage billing.
+5. Have `/terms`, `/privacy` and `/refunds` reviewed (they commit you to a 14-day
+   refund window and 30-day deletion), pass Dodo's business verification, then switch
+   to live-mode keys, product and webhook.
 
+For a worker that does not depend on your Mac, `deploy/worker/compose.yaml` runs it
+on any Linux server with Docker, with Caddy in front.
+
+## Known limits
+
+- The worker runs only while your Mac is awake.
 - Rate limits are in memory, per API instance.
 - The master key is an environment variable (no KMS).
-- Plan limits (1 and 25 services; 10 and 500 incidents) are the seeded values in
+- Plan limits (Free: 1 service, 10 incidents a month) are the seeded values in
   `plans`. Change them in the database.
-- A workspace that drops to Free keeps the services it already has. The limit
-  applies only to adding new ones.

@@ -24,6 +24,11 @@ export function planFacts(plan: PlanOffer): string[] {
   return [
     `${plan.maxServices} watched service${plan.maxServices === 1 ? '' : 's'}`,
     `${plan.maxIncidentsPerMonth} investigated incidents a month`,
-    plan.includedModelUsd == null ? 'Bring your own Anthropic key' : `$${plan.includedModelUsd} of model usage included a month, or bring your own key`,
+    plan.includedModelUsd == null ? 'Bring your own Anthropic key (Settings → Model key)' : `$${plan.includedModelUsd} of model usage included a month, or bring your own key`,
   ];
+}
+
+/** Plans a visitor can actually be on: the free plan, and paid plans that can be bought here. */
+export function offeredPlans(plans: PlanOffer[]): PlanOffer[] {
+  return plans.filter((p) => p.purchasable || p.id === 'free');
 }

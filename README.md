@@ -22,16 +22,17 @@ Your first sign-in creates a workspace. From there:
 3. Add a service: its repository, the health URL that reports its deployed commit,
    the Slack channel, and how much it may do.
 
-The free plan watches one service. Paid plans are bought in the console (Settings →
-Plan and billing) through Dodo Payments; see [pricing](https://page-iota-six.vercel.app/pricing).
+It is a free beta: the free plan watches one service, and each workspace brings its
+own Anthropic key (Settings → Model key).
 
 Nothing to connect yet? **Send a test incident** from the setup page. It runs a demo
 incident against built-in stand-ins for GitHub, Datadog and Slack: investigate,
 reproduce, patch, validate, stop at the approval. It doesn't count against your plan.
 
-Self-hosting: [docs/launch.md](docs/launch.md) is the whole sequence: the console on
-Vercel, the API and Postgres on Render (`render.yaml`), the worker on a Docker host
-(`deploy/worker`), payments through Dodo. `pnpm launch:check` then asks the running
+Self-hosting: [docs/launch.md](docs/launch.md) is the whole sequence, for $0: the
+console on Vercel, the API on Render's free tier (`render.yaml`), Postgres on Neon's
+free plan, the worker on a machine with Docker (`deploy/worker`). Paid plans through
+Dodo Payments are built and switched off until their variables are set. `pnpm launch:check` then asks the running
 services whether they are ready. Every variable is documented in `.env.example`.
 
 <p align="center">

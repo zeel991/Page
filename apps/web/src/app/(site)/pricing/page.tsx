@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { DocPage } from '@/components/site/doc-page';
 import { operator } from '@/lib/operator';
-import { planFacts, priceLabel, type PlanOffer } from '@/lib/pricing';
+import { offeredPlans, planFacts, priceLabel, type PlanOffer } from '@/lib/pricing';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +30,7 @@ export default async function PricingPage() {
         <p className="text-carbon/70">Plans could not be loaded just now. {email ? <>Ask us at <a href={`mailto:${email}`}>{email}</a>.</> : null}</p>
       ) : (
         <div className="grid gap-5 md:grid-cols-2">
-          {data.plans.map((p) => (
+          {offeredPlans(data.plans).map((p) => (
             <section key={p.id} className="rounded-md border border-carbon/15 bg-white/50 p-6">
               <h2 className="!mt-0">{p.name}</h2>
               <p className="display mt-2 text-[28px]">{priceLabel(p)}</p>
@@ -44,15 +44,24 @@ export default async function PricingPage() {
           ))}
         </div>
       )}
-      <p>
-        Start on the free plan by <Link href="/signin">signing up with GitHub</Link>; upgrade from Settings → Plan and billing
-        once you are in. Cancel any time from the same place; the plan stays until the end of the period you paid for. See the{' '}
-        <Link href="/refunds">refund and cancellation policy</Link>.
-      </p>
-      <p className="text-[13px] text-carbon/70">
-        Payments are processed by Dodo Payments, which acts as the merchant of record: the charge on your statement comes from
-        them, and they handle sales tax and VAT.
-      </p>
+      {data?.enabled ? (
+        <>
+          <p>
+            Start on the free plan by <Link href="/signin">signing up with GitHub</Link>; upgrade from Settings → Plan and billing
+            once you are in. Cancel any time from the same place; the plan stays until the end of the period you paid for. See the{' '}
+            <Link href="/refunds">refund and cancellation policy</Link>.
+          </p>
+          <p className="text-[13px] text-carbon/70">
+            Payments are processed by Dodo Payments, which acts as the merchant of record: the charge on your statement comes from
+            them, and they handle sales tax and VAT.
+          </p>
+        </>
+      ) : (
+        <p>
+          Pager Developer is in a free beta: <Link href="/signin">sign up with GitHub</Link> and use the free plan. There are no
+          paid plans yet, and nothing asks for a card.
+        </p>
+      )}
     </DocPage>
   );
 }
