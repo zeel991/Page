@@ -2,7 +2,7 @@ import { cpSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createDatabase } from '../src/client.js';
+import { createDatabase, postgresUrl } from '../src/client.js';
 import { MIGRATIONS_DIR, migrate } from '../src/migrate.js';
 import { deployments, evidence, incidents, organizations, repositories, services } from '../src/schema.js';
 
@@ -225,5 +225,20 @@ describe('migrations', () => {
     await expect(migrate(h)).resolves.toBeUndefined();
     expect(await tableExists(h, 'organizations')).toBe(true);
     await h.close();
+  });
+});
+
+// A Neon connection string carries channel_binding=require, which postgres.js
+// forwarded to the server as a startup setting, which the server refuses.
+describe('postgresUrl', () => {
+  it('drops libpq-only parameters and keeps the rest', () => {
+    expect(postgresUrl('postgresql://u:p@ep-x.neon.tech/neondb?sslmode=require&channel_binding=require')).toBe(
+      'postgresql://u:p@ep-x.neon.tech/neondb?sslmode=require',
+    );
+  });
+
+  it('leaves a URL without them exactly as it was', () => {
+    const url = 'postgres://pager@db:5432/pager?sslmode=require';
+    expect(postgresUrl(url)).toBe(url);
   });
 });

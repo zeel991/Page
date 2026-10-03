@@ -63,7 +63,7 @@ export async function createDatabase(
     };
   }
 
-  const sql = postgres(url, { max: opts.max ?? 10, onnotice: () => {} });
+  const sql = postgres(postgresUrl(url), { max: opts.max ?? 10, onnotice: () => {} });
   return {
     db: drizzlePg(sql, { schema }),
     pglite: null,
@@ -72,3 +72,29 @@ export async function createDatabase(
 }
 
 export { schema };
+
+/**
+ * libpq connection parameters postgres.js does not understand. postgres.js sends any
+ * URL parameter it does not know to the server as a startup setting, and the server
+ * refuses the connection over an unknown one, so a connection string copied as Neon
+ * gives it (`…?sslmode=require&channel_binding=require`) failed at the first query.
+ * postgres.js negotiates SCRAM channel binding itself when the server offers it.
+ */
+const LIBPQ_ONLY_PARAMS = ['channel_binding'];
+
+export function postgresUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  let changed = false;
+  for (const p of LIBPQ_ONLY_PARAMS) {
+    if (parsed.searchParams.has(p)) {
+      parsed.searchParams.delete(p);
+      changed = true;
+    }
+  }
+  return changed ? parsed.toString() : url;
+}
