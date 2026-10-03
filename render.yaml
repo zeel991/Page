@@ -39,12 +39,18 @@ services:
     name: pager-api
     runtime: node
     plan: free
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm -r --filter './packages/**' build
-    startCommand: pnpm db:migrate && pnpm --filter @pager/api start
+    # `corepack pnpm` runs the pnpm pinned in package.json without `corepack enable`,
+    # which would try to replace Render's read-only /usr/bin/pnpm (EROFS).
+    buildCommand: corepack pnpm install --frozen-lockfile && corepack pnpm -r --filter './packages/**' build
+    # Plain node at start: migrate, then serve. No package manager at runtime.
+    startCommand: cd packages/db && node dist/migrate-cli.js && cd ../../apps/api && node --experimental-strip-types src/main.ts
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
         value: "24"
+      # Corepack would otherwise ask before downloading the pinned pnpm.
+      - key: COREPACK_ENABLE_DOWNLOAD_PROMPT
+        value: "0"
       - fromGroup: pager-secrets
       # Neon's connection string (it includes sslmode=require).
       - key: DATABASE_URL
