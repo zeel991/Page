@@ -11,8 +11,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-command -v docker >/dev/null || { echo "Docker is not installed. On a Mac: Docker Desktop (docker.com/products/docker-desktop)." >&2; exit 1; }
-docker info >/dev/null 2>&1 || { echo "Docker is installed but not running. Start Docker Desktop and try again." >&2; exit 1; }
+command -v docker >/dev/null || { echo "Docker is not installed. On a Mac: brew install colima docker (or Docker Desktop)." >&2; exit 1; }
+# Colima's daemon when it is running, without changing the docker CLI's default
+# context for anything else on this machine.
+if [ -z "${DOCKER_HOST:-}" ] && command -v colima >/dev/null && colima status >/dev/null 2>&1; then
+  export DOCKER_HOST="$(docker context inspect colima --format '{{.Endpoints.docker.Host}}')"
+fi
+docker info >/dev/null 2>&1 || { echo "No Docker daemon is reachable. Start one (colima start --mount \"\$HOME/.pager:w\", or Docker Desktop) and try again." >&2; exit 1; }
 [ -f deploy/worker/worker.env ] || { echo "Copy deploy/worker/worker.env.example to deploy/worker/worker.env and fill it in." >&2; exit 1; }
 
 echo "building the sandbox image (first time: a few minutes)…"
@@ -24,7 +29,11 @@ pnpm -r --filter './packages/**' build >/dev/null
 # Set here, so worker.env cannot switch the sandbox off.
 export PAGER_SANDBOX_RUNNER=docker
 export PAGER_SANDBOX_IMAGE=pager-sandbox:latest
+# Under ~/.pager: a Docker VM (Colima, Docker Desktop) can bind-mount only the host
+# paths it shares, and the OS temp directory is not one of them under Colima.
+export PAGER_SANDBOX_ROOT="${PAGER_SANDBOX_ROOT:-$HOME/.pager/sandboxes}"
 export PAGER_DEPENDENCY_CACHE="${PAGER_DEPENDENCY_CACHE:-$HOME/.pager/dependency-cache}"
+mkdir -p "$PAGER_SANDBOX_ROOT" "$PAGER_DEPENDENCY_CACHE"
 
 cd apps/worker
 run=(node --env-file=../../deploy/worker/worker.env --experimental-strip-types src/main.ts)

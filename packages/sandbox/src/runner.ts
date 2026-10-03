@@ -306,6 +306,24 @@ export function dockerRunArgs(spec: RunSpec, opts: DockerRunnerOptions, containe
   ];
 }
 
+/** Docker's own settings for reaching its daemon, the only ones the client is given. */
+const DOCKER_CLIENT_SETTINGS = ['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY'] as const;
+
+/**
+ * The environment of the `docker` client itself (not of the container): a PATH, a
+ * HOME inside the sandbox, and the settings that say which daemon to use. Without
+ * them the client fell back to its default socket, so a worker pointed at a
+ * non-default daemon (Colima's, a remote host's) could not start a sandbox.
+ */
+export function dockerClientEnvironment(env: NodeJS.ProcessEnv, homeDir: string): Record<string, string> {
+  const out: Record<string, string> = { PATH: env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: homeDir };
+  for (const key of DOCKER_CLIENT_SETTINGS) {
+    const value = env[key];
+    if (value) out[key] = value;
+  }
+  return out;
+}
+
 /**
  * Runs each command in a fresh container.
  *
@@ -338,8 +356,7 @@ export class DockerRunner implements SandboxRunner {
     const docker = this.opts.dockerBin ?? 'docker';
     const name = `pager-sandbox-${randomBytes(6).toString('hex')}`;
     return runProcess(this.spawnImpl, docker, dockerRunArgs(spec, this.opts, name), {
-      // The docker client needs a PATH and nothing else of ours.
-      env: { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: spec.homeDir },
+      env: dockerClientEnvironment(process.env, spec.homeDir),
       timeoutMs: spec.timeoutMs,
       maxOutputBytes: spec.maxOutputBytes,
       onTimeout: () => {

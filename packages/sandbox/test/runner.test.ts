@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { DockerRunner, LocalProcessRunner, containerUser, dockerRunArgs, repositoryPath, type RunSpec } from '../src/runner.js';
+import { DockerRunner, LocalProcessRunner, containerUser, dockerClientEnvironment, dockerRunArgs, repositoryPath, type RunSpec } from '../src/runner.js';
 
 /**
  * DockerRunner is tested against the command it builds, because this machine has
@@ -80,6 +80,18 @@ describe('containerUser', () => {
 
   it('keys installs by image, not only by runner kind', () => {
     expect(new DockerRunner({ image: 'pager-sandbox:1', user: '1:1' }).cacheScope).not.toBe(new DockerRunner({ image: 'pager-sandbox:2', user: '1:1' }).cacheScope);
+  });
+});
+
+describe('dockerClientEnvironment', () => {
+  // A worker using a non-default daemon (Colima, a remote context) set DOCKER_HOST,
+  // and the client never saw it: it was given PATH and HOME only.
+  it('passes which daemon to use, and nothing else of the worker’s', () => {
+    const env = dockerClientEnvironment(
+      { PATH: '/bin', DOCKER_HOST: 'unix:///Users/x/.colima/default/docker.sock', DOCKER_CONTEXT: 'colima', PAGER_MASTER_KEY: 'secret', HOME: '/Users/x' },
+      '/sandbox/home',
+    );
+    expect(env).toEqual({ PATH: '/bin', HOME: '/sandbox/home', DOCKER_HOST: 'unix:///Users/x/.colima/default/docker.sock', DOCKER_CONTEXT: 'colima' });
   });
 });
 
