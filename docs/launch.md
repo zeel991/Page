@@ -77,8 +77,8 @@ Project → Settings → Environment Variables (Production):
 | `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` | the GitHub App's client id and secret |
 | `PAGER_API_URL` | `API` |
 | `PAGER_SESSION_SECRET` | the value from `pager-secrets` |
-| `PAGER_LEGAL_NAME` | the legal name of whoever operates the service |
-| `PAGER_SUPPORT_EMAIL` | a monitored support address |
+| `PAGER_LEGAL_NAME` | optional in the free beta: the legal name of whoever operates the service |
+| `PAGER_SUPPORT_EMAIL` | optional in the free beta: a monitored support address. Unset, the pages point to the project's GitHub issues |
 | `PAGER_LEGAL_EFFECTIVE_DATE` | optional, shown on the policies |
 
 Redeploy. This fixes the live console's sign-in, which answers `/api/auth/providers`

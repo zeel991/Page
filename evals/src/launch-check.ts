@@ -60,11 +60,16 @@ export async function launchChecks(urls: { console: string; api: string; worker:
     const body = !('error' in r) && r.status === 200 ? r.text : '';
     add(`console: ${page}`, !('error' in r) && r.status === 200, seen(r));
     if (page === '/contact' && !body) {
-      add('console: operator name and support address are set', false, 'no contact page');
+      add('console: contact page names a way to reach the operator', false, 'no contact page');
     }
     if (page === '/contact' && body) {
-      add('console: operator name is set (PAGER_LEGAL_NAME)', !body.includes('PAGER_LEGAL_NAME is not set'), body.includes('PAGER_LEGAL_NAME is not set') ? 'unset' : 'set');
-      add('console: support address is set (PAGER_SUPPORT_EMAIL)', body.includes('mailto:'), body.includes('mailto:') ? 'set' : 'unset');
+      const route = body.includes('mailto:') ? 'email' : /github\.com\/[^"]+\/issues/.test(body) ? 'issue tracker' : null;
+      add('console: contact page names a way to reach the operator', Boolean(route), route ?? 'none');
+      // Taking payments needs a named operator and a monitored address (Dodo's review).
+      if (opts.payments) {
+        add('console: operator name is set (PAGER_LEGAL_NAME)', !body.includes('maintainers of the Pager Developer project'), body.includes('maintainers of the Pager Developer project') ? 'unset' : 'set');
+        add('console: support address is set (PAGER_SUPPORT_EMAIL)', route === 'email', route === 'email' ? 'set' : 'unset');
+      }
     }
     if (page === '/pricing' && body) {
       const text = body.replace(/<!-- -->/g, '');

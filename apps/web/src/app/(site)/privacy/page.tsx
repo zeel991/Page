@@ -1,11 +1,10 @@
-import Link from 'next/link';
 import { DocPage } from '@/components/site/doc-page';
 import { operator } from '@/lib/operator';
 
 export const dynamic = 'force-dynamic';
 
 export default function PrivacyPage() {
-  const { email, nameOrGap } = operator();
+  const { contact, nameOrGap } = operator();
   return (
     <DocPage eyebrow="Policy" title="Privacy">
       <p>This describes what Pager Developer, operated by {nameOrGap}, collects, why, who it is shared with, and how to have it deleted.</p>
@@ -35,7 +34,7 @@ export default function PrivacyPage() {
       <h2>Your choices</h2>
       <p>
         An owner or admin can replace a stored credential from Settings at any time. To disconnect an integration and delete its
-        credential, get a copy of your data, correct it, or delete your account or workspace, {email ? <>email <a href={`mailto:${email}`}>{email}</a></> : <>use the <Link href="/contact">contact page</Link></>}.
+        credential, get a copy of your data, correct it, or delete your account or workspace, {contact.how === 'email' ? 'email' : 'write to'} <a href={contact.href}>{contact.label}</a>.
         Depending on where you live you may have further rights, including to complain to your data protection authority.
       </p>
     </DocPage>

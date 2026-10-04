@@ -18,7 +18,7 @@ async function plans(): Promise<{ enabled: boolean; plans: PlanOffer[] } | null>
 
 export default async function PricingPage() {
   const data = await plans();
-  const { email } = operator();
+  const { contact } = operator();
   return (
     <DocPage eyebrow="Plans" title="Pricing">
       <p>
@@ -27,7 +27,7 @@ export default async function PricingPage() {
         or deploys on its own.
       </p>
       {!data ? (
-        <p className="text-carbon/70">Plans could not be loaded just now. {email ? <>Ask us at <a href={`mailto:${email}`}>{email}</a>.</> : null}</p>
+        <p className="text-carbon/70">Plans could not be loaded just now. <>Ask at <a href={contact.href}>{contact.label}</a>.</></p>
       ) : (
         <div className="grid gap-5 md:grid-cols-2">
           {offeredPlans(data.plans).map((p) => (

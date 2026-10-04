@@ -13,7 +13,7 @@ export const SITE_LINKS = [
 
 /** The footer every public page carries: pricing, policies and a way to reach a person. */
 export function SiteFooter({ tone = 'paper' }: { tone?: 'paper' | 'dark' }) {
-  const { email } = operator();
+  const { contact } = operator();
   const muted = tone === 'dark' ? 'text-paper/60 hover:text-paper' : 'text-carbon/60 hover:text-carbon';
   return (
     <nav aria-label="Policies" className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[12px]">
@@ -22,11 +22,9 @@ export function SiteFooter({ tone = 'paper' }: { tone?: 'paper' | 'dark' }) {
           {label}
         </Link>
       ))}
-      {email && (
-        <a href={`mailto:${email}`} className={muted}>
-          {email}
-        </a>
-      )}
+      <a href={contact.href} className={muted}>
+        {contact.how === 'email' ? contact.label : 'Support'}
+      </a>
     </nav>
   );
 }

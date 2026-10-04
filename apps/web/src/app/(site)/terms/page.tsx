@@ -5,7 +5,7 @@ import { operator } from '@/lib/operator';
 export const dynamic = 'force-dynamic';
 
 export default function TermsPage() {
-  const { email, nameOrGap } = operator();
+  const { contact, nameOrGap } = operator();
   return (
     <DocPage eyebrow="Policy" title="Terms of service">
       <p>
@@ -63,7 +63,7 @@ export default function TermsPage() {
       <h2>9. Changes to these terms</h2>
       <p>We will post changes here and notify workspace owners of material ones by email at least 14 days before they apply.</p>
       <h2>10. Contact</h2>
-      <p>{email ? <>Questions about these terms: <a href={`mailto:${email}`}>{email}</a>.</> : <>See the <Link href="/contact">contact page</Link>.</>}</p>
+      <p>Questions about these terms: <a href={contact.href}>{contact.label}</a>, or see the <Link href="/contact">contact page</Link>.</p>
     </DocPage>
   );
 }

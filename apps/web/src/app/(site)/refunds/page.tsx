@@ -4,8 +4,8 @@ import { operator } from '@/lib/operator';
 export const dynamic = 'force-dynamic';
 
 export default function RefundsPage() {
-  const { email, nameOrGap } = operator();
-  const write = email ? <a href={`mailto:${email}`}>{email}</a> : 'the support address on the contact page';
+  const { contact, nameOrGap } = operator();
+  const write = <a href={contact.href}>{contact.label}</a>;
   return (
     <DocPage eyebrow="Policy" title="Refunds and cancellation">
       <p>This policy covers paid plans of Pager Developer, operated by {nameOrGap}. Payments are processed by Dodo Payments as merchant of record.</p>
