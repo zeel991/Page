@@ -58,7 +58,13 @@ if [ -z "$(current GITHUB_APP_PRIVATE_KEY)" ]; then
 fi
 
 ask_secret GITHUB_APP_CLIENT_SECRET "GITHUB_APP_CLIENT_SECRET (GitHub App → Client secrets)"
-ask_secret GITHUB_APP_WEBHOOK_SECRET "GITHUB_APP_WEBHOOK_SECRET (what you typed when creating the app)"
+# The webhook secret generated for the GitHub App and Render, when it is on disk.
+saved="$(cd .. && cd .. && pwd)/.pager/webhook-secret.txt"
+if [ -s "$saved" ] && [ -z "$(current GITHUB_APP_WEBHOOK_SECRET)" ]; then
+  set_value GITHUB_APP_WEBHOOK_SECRET "$(cat "$saved")"; echo "GITHUB_APP_WEBHOOK_SECRET: from .pager/webhook-secret.txt"
+else
+  ask_secret GITHUB_APP_WEBHOOK_SECRET "GITHUB_APP_WEBHOOK_SECRET (what you set on the GitHub App)"
+fi
 
 missing=$(grep -E '^(DATABASE_URL|PAGER_MASTER_KEY|GITHUB_APP_[A-Z_]+)=$' worker.env | cut -d= -f1 | tr '\n' ' ')
 if [ -n "$missing" ]; then echo "Still empty: $missing"; else echo "worker.env is complete. Start the worker: deploy/worker/run-here.sh"; fi
