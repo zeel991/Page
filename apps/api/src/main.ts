@@ -47,7 +47,18 @@ async function main(): Promise<void> {
 
   await app.listen({ port: PORT, host: HOST });
   console.log(`Pager Developer API listening on http://${HOST}:${PORT}`);
-  console.log(`  database ${process.env.DATABASE_URL ?? 'pglite://.pager/db'}`);
+  console.log(`  database ${describeDatabase(process.env.DATABASE_URL)}`);
+}
+
+/** The database's host and name for the log, never its password. */
+function describeDatabase(url: string | undefined): string {
+  if (!url) return 'pglite://.pager/db';
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.hostname}${u.pathname}`;
+  } catch {
+    return '(unparseable DATABASE_URL)';
+  }
 }
 
 void main().catch((err) => {
