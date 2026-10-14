@@ -1,6 +1,9 @@
 import Link from 'next/link';
 import { ApiUnavailableError, api, type IncidentRow, type Overview } from '@/lib/api';
 import { ApiDown } from '@/components/api-down';
+import { ActionForm } from '@/components/console/action-form';
+import { sendTestIncident } from '../actions';
+import { loadSetup } from '@/lib/setup';
 import { DitherPager } from '@/components/motion/dither';
 import { CircleLink, Marquee } from '@/components/site/primitives';
 import {
@@ -32,6 +35,15 @@ const STATE_BAR: Record<string, string> = {
   APPROVAL_REJECTED: 'bg-edge',
 };
 
+interface WatchedService {
+  id: string;
+  name: string;
+  alertSource: string;
+  enabled: boolean;
+  lastPolledAt: string | null;
+  lastPollOutcome: string | null;
+}
+
 function byState(incidents: IncidentRow[]): [string, number][] {
   const counts = new Map<string, number>();
   for (const i of incidents) counts.set(i.state, (counts.get(i.state) ?? 0) + 1);
@@ -45,8 +57,14 @@ function topSeverity(open: IncidentRow[]): string | null {
 
 export default async function OverviewPage() {
   let data: Overview;
+  let setup: Awaited<ReturnType<typeof loadSetup>> | null = null;
+  let watched: WatchedService[] = [];
   try {
     data = await api<Overview>('/api/overview');
+    if (data.incidents.length === 0) {
+      [setup, { services: watched }] = await Promise.all([loadSetup(), api<{ services: WatchedService[] }>('/api/services')]);
+      watched = watched.filter((s) => s.alertSource !== 'sample');
+    }
   } catch (err) {
     if (err instanceof ApiUnavailableError) return <ApiDown url={err.url} />;
     throw err;
@@ -105,6 +123,29 @@ export default async function OverviewPage() {
       />
 
       <div className="mt-10 space-y-12">
+        {setup && (
+          <Panel title="Waiting for the first alert" subtitle="nothing has happened yet, which is the point">
+            {watched.length === 0 ? (
+              <p className="text-[12px] text-muted">
+                No service is being watched yet. <Link href="/onboarding" className="text-accent underline-offset-4 hover:underline">Finish setup</Link> to add one.
+              </p>
+            ) : (
+              <ul className="space-y-1 font-mono text-[11px] text-muted">
+                {watched.map((s) => (
+                  <li key={s.id}>
+                    <span className="text-text">{s.name}</span> · {s.enabled ? 'watching' : 'not watching'} ·{' '}
+                    {s.lastPolledAt ? `last poll ${dateOf(s.lastPolledAt)}: ${s.lastPollOutcome ?? ''}` : 'waiting for the first poll'}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="mt-4 max-w-2xl text-[12px] leading-relaxed text-muted">
+              When a monitor fires, the incident appears here and in Slack within one poll interval. To see the whole flow now,
+              send a test incident: it runs against built-in stand-ins, touches nothing of yours, and does not count against the plan.
+            </p>
+            <ActionForm action={sendTestIncident} submit="Send a test incident" tone="quiet" className="mt-3" />
+          </Panel>
+        )}
         <section>
           <div className="eyebrow mb-4 px-4 text-[10px] text-muted">Numbers</div>
           <StatGrid className="grid-cols-2 md:grid-cols-3 xl:grid-cols-6">

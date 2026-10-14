@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { JobQueue, eq, plans, revisionRuns } from '@pager/db';
 import { ScriptedPatchGenerator, SCRIPTS } from '@pager/agents';
 import { LocalProcessRunner } from '@pager/sandbox';
-import { harness, healthServer, onboard, type Harness } from '../../api/test/harness.ts';
+import { harness, healthServer, installThroughGitHub, onboard, type Harness } from '../../api/test/harness.ts';
 import { Worker } from '../src/worker.ts';
 import type { JobContext } from '../src/jobs.ts';
 
@@ -35,25 +35,39 @@ function worker() {
   return new Worker(queue, ctx, { log: () => {} });
 }
 
-type Steps = { steps: { id: string; status: string }[]; plan: { services: { used: number; limit: number } } };
+type Steps = { steps: { id: string; status: string }[]; complete: boolean; attention: boolean; plan: { services: { used: number; limit: number } } };
 
 describe('onboarding', () => {
   it('reports each step from what actually exists', async () => {
     const fresh = await h.signIn('carol', '3003');
     const before = (await h.call('GET', '/api/onboarding', fresh.token)).json() as Steps;
-    expect(before.steps.filter((s) => s.status === 'done').map((s) => s.id)).toEqual(['signed_in']);
+    const status = (s: Steps) => Object.fromEntries(s.steps.map((x) => [x.id, x.status]));
+    expect(before.steps.map((s) => s.id)).toEqual(['github', 'alerts', 'slack', 'model_key', 'service']);
+    expect(before.steps.filter((s) => s.status === 'done')).toEqual([]);
+    expect(before.complete).toBe(false);
+
+    // Installed but nothing picked: the step asks for attention rather than reading as done.
+    const { url: gh } = (await h.call('GET', '/api/github/install-url', fresh.token)).json() as { url: string };
+    await h.call('POST', '/api/github/setup', fresh.token, await installThroughGitHub(gh, { repositories: ['acme/checkout-api'] }));
+    expect(status((await h.call('GET', '/api/onboarding', fresh.token)).json() as Steps)).toMatchObject({ github: 'attention' });
 
     const { session, service } = await onboard(h, { healthUrl: health.url });
     let after = (await h.call('GET', '/api/onboarding', session.token)).json() as Steps;
-    const status = (s: Steps) => Object.fromEntries(s.steps.map((x) => [x.id, x.status]));
-    expect(status(after)).toMatchObject({ github: 'done', repository: 'done', slack: 'done', service: 'done', datadog: 'attention', health: 'attention', watching: 'attention' });
+    // The free plan includes no model spend, so a key of the workspace's own is a step.
+    expect(status(after)).toMatchObject({ github: 'done', slack: 'done', alerts: 'attention', model_key: 'todo', service: 'attention' });
+    expect(after.complete).toBe(true);
+    expect(after.attention).toBe(true);
 
     await h.call('POST', '/api/integrations/datadog/test', session.token);
+    await h.call('PUT', '/api/integrations/anthropic', session.token, { apiKey: 'sk-ant-test-0123456789' });
     await h.call('POST', `/api/services/${service.id}/test-health`, session.token);
     await worker().schedulePolls();
     await worker().drain();
     after = (await h.call('GET', '/api/onboarding', session.token)).json() as Steps;
-    expect(status(after)).toMatchObject({ datadog: 'done', health: 'done' });
+    // The poll ran on the test clock, weeks ago by the real one, so the service still
+    // asks for attention: its detail names the poll rather than the health URL.
+    expect(status(after)).toMatchObject({ alerts: 'done', model_key: 'done', service: 'attention' });
+    expect(after.steps.find((s) => s.id === 'service')).toMatchObject({ detail: expect.stringMatching(/^checkout-api: /) });
     expect(after.plan.services).toEqual({ used: 1, limit: 1 });
   });
 

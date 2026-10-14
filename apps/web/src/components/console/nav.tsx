@@ -16,13 +16,21 @@ export const CONSOLE_NAV = [
 
 const ROW = 40;
 
-function activeIndex(pathname: string): number {
-  return CONSOLE_NAV.findIndex(([, href]) => pathname === href || pathname.startsWith(`${href}/`));
+type Item = (typeof CONSOLE_NAV)[number];
+
+/** Setup leaves the navigation once a service is being watched; it stays reachable from Services. */
+function items(hideSetup: boolean): readonly Item[] {
+  return hideSetup ? CONSOLE_NAV.filter(([, href]) => href !== '/onboarding') : CONSOLE_NAV;
+}
+
+function activeIndex(nav: readonly Item[], pathname: string): number {
+  return nav.findIndex(([, href]) => pathname === href || pathname.startsWith(`${href}/`));
 }
 
 /** Sidebar navigation. The red marker glides to the active row rather than jumping. */
-export function SideNav() {
-  const active = activeIndex(usePathname());
+export function SideNav({ hideSetup = false }: { hideSetup?: boolean }) {
+  const nav = items(hideSetup);
+  const active = activeIndex(nav, usePathname());
   return (
     <ul className="relative px-3">
       {active >= 0 && (
@@ -34,7 +42,7 @@ export function SideNav() {
           <span className="absolute top-0 bottom-0 left-0 w-[3px] bg-signal" />
         </span>
       )}
-      {CONSOLE_NAV.map(([label, href, n], i) => (
+      {nav.map(([label, href, n], i) => (
         <li key={href} className="relative">
           <Link
             href={href}
@@ -52,11 +60,12 @@ export function SideNav() {
 }
 
 /** The same navigation as a horizontal strip, for narrow screens. */
-export function TopNav() {
-  const active = activeIndex(usePathname());
+export function TopNav({ hideSetup = false }: { hideSetup?: boolean }) {
+  const nav = items(hideSetup);
+  const active = activeIndex(nav, usePathname());
   return (
     <ul className="flex gap-1 overflow-x-auto px-4 pb-3 [scrollbar-width:none]">
-      {CONSOLE_NAV.map(([label, href], i) => (
+      {nav.map(([label, href], i) => (
         <li key={href}>
           <Link
             href={href}

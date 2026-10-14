@@ -1,32 +1,14 @@
-import { DATADOG_API_HOSTS } from '@pager/core';
 import { api } from '@/lib/api';
 import { PageHeader, Panel, dateOf } from '@/components/ui';
 import { ActionForm } from '@/components/console/action-form';
 import { Field, INPUT } from '@/components/console/fields';
-import { openBillingPortal, saveAnthropic, saveBudget, saveDatadog, saveNotion, saveResend, saveSentry, startCheckout, testIntegration } from '../actions';
+import { Connection, DatadogForm, ModelKeyForm, SentryForm } from '@/components/console/setup/integrations';
+import { openBillingPortal, saveBudget, saveNotion, saveResend, startCheckout, testIntegration } from '../actions';
 import { NOTICES } from '@/lib/notices';
 import { offeredPlans, planFacts, priceLabel, type PlanOffer } from '@/lib/pricing';
+import { loadIntegrations, loadSetup, type IntegrationStatus } from '@/lib/setup';
 
 export const dynamic = 'force-dynamic';
-
-interface IntegrationStatus {
-  configured: boolean;
-  baseUrl?: string | null;
-  config?: Record<string, unknown> | null;
-  verifiedAt?: string | null;
-  lastError?: string | null;
-  keys: { kind: string; last4: string }[];
-}
-
-interface Integrations {
-  github: { installations: { id: string; accountLogin: string }[] };
-  slack: { teamId: string; teamName: string } | null;
-  datadog: IntegrationStatus;
-  sentry: IntegrationStatus;
-  notion: IntegrationStatus;
-  resend: IntegrationStatus;
-  anthropic: IntegrationStatus;
-}
 
 interface Billing {
   enabled: boolean;
@@ -41,23 +23,6 @@ interface Usage {
   monthlyBudgetUsd: number | null;
 }
 
-/** What is stored, stated plainly: never the secret, only that one exists and how it ends. */
-function Stored({ status }: { status: IntegrationStatus }) {
-  if (!status.configured) return <p className="font-mono text-[11px] text-dim">Not connected.</p>;
-  return (
-    <p className="font-mono text-[11px] text-muted">
-      {status.keys.map((k) => `${k.kind} ····${k.last4}`).join(' · ') || 'no keys stored'}
-      {status.verifiedAt ? (
-        <span className="text-ok"> · verified {dateOf(status.verifiedAt)}</span>
-      ) : status.lastError ? (
-        <span className="text-sev1"> · last test failed: {status.lastError}</span>
-      ) : (
-        <span className="text-sev3"> · not yet tested</span>
-      )}
-    </p>
-  );
-}
-
 function Section({ id, title, subtitle, status, provider, children }: {
   id: string;
   title: string;
@@ -69,9 +34,7 @@ function Section({ id, title, subtitle, status, provider, children }: {
   return (
     <section id={id}>
       <Panel title={title} subtitle={subtitle}>
-        <Stored status={status} />
-        <div className="mt-4 max-w-xl">{children}</div>
-        {status.configured && <ActionForm action={testIntegration.bind(null, provider)} submit="Test connection" tone="quiet" className="mt-2" />}
+        <Connection status={status} provider={provider}>{children}</Connection>
       </Panel>
     </section>
   );
@@ -80,21 +43,19 @@ function Section({ id, title, subtitle, status, provider, children }: {
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ notice?: string }> }) {
   const { notice } = await searchParams;
   const shown = notice ? NOTICES[notice] : undefined;
-  const [i, usage, me, billing, onboarding] = await Promise.all([
-    api<Integrations>('/api/integrations'),
+  const [i, usage, me, billing, setup] = await Promise.all([
+    loadIntegrations(),
     api<Usage>('/api/usage'),
     api<{ role: string }>('/api/me'),
     api<Billing>('/api/billing'),
-    api<{ plan: { plan: { id: string; name: string } } }>('/api/onboarding'),
+    loadSetup(),
   ]);
-  const currentPlan = onboarding.plan.plan;
+  const currentPlan = setup.plan.plan;
+  const keyIncluded = setup.plan.includedModelUsd != null;
   const sub = billing.subscription;
   // The statuses that keep a paid plan (ENTITLING_STATUSES in @pager/db).
   const paying = sub ? ['active', 'past_due'].includes(sub.status) : false;
-  const hosts = [...DATADOG_API_HOSTS];
-  const site = i.datadog.baseUrl ?? 'https://api.datadoghq.com';
   const resendFrom = typeof i.resend.config?.from === 'string' ? i.resend.config.from : '';
-  const sentryOrg = typeof i.sentry.config?.organization === 'string' ? i.sentry.config.organization : '';
 
   return (
     <div className="space-y-6">
@@ -161,46 +122,21 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       </Panel>
 
       <Section id="datadog" title="Datadog" subtitle="where alerts and telemetry come from" status={i.datadog} provider="datadog">
-        <ActionForm action={saveDatadog} submit="Save Datadog" className="space-y-3">
-          <Field label="Site" hint="Keys are only ever sent to Datadog's own API host for your site.">
-            <select name="site" defaultValue={site} className={INPUT}>
-              {hosts.map((h) => (
-                <option key={h} value={`https://${h}`}>{h}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="API key" hint={i.datadog.configured ? 'Leave blank to keep the stored key.' : undefined}>
-            <input name="apiKey" type="password" autoComplete="off" className={INPUT} />
-          </Field>
-          <Field label="Application key" hint="Needs read access to monitors, metrics and logs.">
-            <input name="appKey" type="password" autoComplete="off" className={INPUT} />
-          </Field>
-        </ActionForm>
+        <DatadogForm status={i.datadog} />
       </Section>
 
       <Section id="sentry" title="Sentry" subtitle="an alternative alert source: new and regressed issues" status={i.sentry} provider="sentry">
-        <ActionForm action={saveSentry} submit="Save Sentry" className="space-y-3">
-          <Field label="Sentry URL" hint="https://sentry.io, or your region's host (https://us.sentry.io, https://de.sentry.io).">
-            <input name="baseUrl" defaultValue={i.sentry.baseUrl ?? 'https://sentry.io'} className={INPUT} />
-          </Field>
-          <Field label="Organization slug">
-            <input name="organization" defaultValue={sentryOrg} required className={INPUT} placeholder="acme" />
-          </Field>
-          <Field label="Auth token" hint={i.sentry.configured ? 'Leave blank to keep the stored token. Needs event:read and project:read.' : 'Needs event:read and project:read.'}>
-            <input name="token" type="password" autoComplete="off" className={INPUT} />
-          </Field>
-          <Field label="Webhook client secret" hint="Optional. With it, Sentry's issue webhooks (to /webhooks/sentry on the API) wake the poll at once.">
-            <input name="webhookSecret" type="password" autoComplete="off" className={INPUT} />
-          </Field>
-        </ActionForm>
+        <SentryForm status={i.sentry} />
       </Section>
 
-      <Section id="anthropic" title="Model key" subtitle="optional; bring your own Anthropic key" status={i.anthropic} provider="anthropic">
-        <ActionForm action={saveAnthropic} submit="Save key">
-          <Field label="Anthropic API key" hint="Stored encrypted. Runs in this workspace use it instead of the deployment's key.">
-            <input name="apiKey" type="password" autoComplete="off" required className={INPUT} />
-          </Field>
-        </ActionForm>
+      <Section
+        id="anthropic"
+        title="Model key"
+        subtitle={keyIncluded ? 'optional: the plan includes model spend' : `required for fixes: the ${currentPlan.name} plan includes no model spend`}
+        status={i.anthropic}
+        provider="anthropic"
+      >
+        <ModelKeyForm status={i.anthropic} />
       </Section>
 
       <Section id="notion" title="Notion" subtitle="optional; files the incident write-up" status={i.notion} provider="notion">

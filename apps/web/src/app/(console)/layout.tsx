@@ -3,6 +3,8 @@ import { signOut } from '@/auth';
 import { api } from '@/lib/api';
 import { CommandPalette } from '@/components/console/command-palette';
 import { SideNav, TopNav } from '@/components/console/nav';
+import { SetupBanner } from '@/components/console/setup-banner';
+import { loadSetup } from '@/lib/setup';
 import { Wordmark } from '@/components/site/primitives';
 
 const LEVEL_MEANING: Record<string, string> = {
@@ -17,8 +19,9 @@ const LEVEL_MEANING: Record<string, string> = {
 export default async function ConsoleLayout({ children }: { children: React.ReactNode }) {
   // The workspace's own level, read from the database — not a constant in the page.
   const me = await api<{ user: { login: string | null; name: string } | null; role: string; workspaces: { id: string; name: string }[]; organizationId: string }>('/api/me');
-  const policy = await api<{ autonomyLevel: string | null }>('/api/policies');
+  const [policy, setup] = await Promise.all([api<{ autonomyLevel: string | null }>('/api/policies'), loadSetup()]);
   const level = policy.autonomyLevel ?? '—';
+  const stepsDone = setup.steps.filter((s) => s.status === 'done').length;
   const workspace = me.workspaces.find((w) => w.id === me.organizationId);
   return (
     <div className="flex min-h-screen bg-carbon">
@@ -30,7 +33,7 @@ export default async function ConsoleLayout({ children }: { children: React.Reac
           <div className="eyebrow mt-2 text-[10px] text-dim">Incident command centre</div>
         </div>
 
-        <SideNav />
+        <SideNav hideSetup={setup.complete} />
 
         <div className="mx-6 mt-8 border-t border-graphite pt-5">
           <div className="eyebrow text-[10px] text-dim">Autonomy</div>
@@ -74,8 +77,13 @@ export default async function ConsoleLayout({ children }: { children: React.Reac
             </div>
           </div>
           <div className="md:hidden">
-            <TopNav />
+            <TopNav hideSetup={setup.complete} />
           </div>
+          {(!setup.complete || setup.attention) && (
+            <div className="px-4 pb-3 md:px-8">
+              <SetupBanner done={stepsDone} total={setup.steps.length} complete={setup.complete} attention={setup.attention} />
+            </div>
+          )}
         </header>
         <main className="px-4 py-6 md:px-8 md:py-8">{children}</main>
       </div>

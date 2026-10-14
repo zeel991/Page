@@ -332,51 +332,69 @@ export async function registerConfigRoutes(app: FastifyInstance, deps: ConfigRou
   });
 
   // ── Onboarding: each step's real state, read from what exists ───────────────
+  /**
+   * Setup, read from what exists: five steps in the order they depend on each other.
+   * `complete` means a service is being watched, which is when the console stops
+   * treating the workspace as new; `attention` means something saved is not working.
+   */
   app.get('/api/onboarding', async (request) => {
     const o = org(request);
-    const [installs, repos, ddRow, sentryRow, slackRow, svcs, usageNow, sampleJob] = await Promise.all([
+    const [installs, repos, ddRow, sentryRow, anthropicRow, slackRow, svcs, usageNow, sampleJob] = await Promise.all([
       installations.active(o),
       installations.repositories(o),
       integrations.get(o, 'datadog'),
       integrations.get(o, 'sentry'),
+      integrations.get(o, 'anthropic'),
       slack.forOrganization(o),
       services.list(o),
       plans.usage(o),
       deps.db.select().from(jobs).where(and(eq(jobs.organizationId, o), eq(jobs.kind, 'test_incident'))).orderBy(desc(jobs.createdAt)).limit(1),
     ]);
+    const picked = repos.filter((r) => !r.detachedAt);
     const watched = svcs.filter((s) => s.alertSource !== 'sample');
     const service = watched[0] ?? null;
     // The alert source the service uses, or whichever one is connected before there is a service.
-    const dd = service?.alertSource === 'sentry' ? sentryRow : service ? ddRow : (ddRow?.verifiedAt ? ddRow : sentryRow?.verifiedAt ? sentryRow : ddRow ?? sentryRow);
+    const alerts = service?.alertSource === 'sentry' ? sentryRow : service ? ddRow : (ddRow?.verifiedAt ? ddRow : sentryRow?.verifiedAt ? sentryRow : ddRow ?? sentryRow);
     const polledRecently =
       service?.lastPolledAt && Date.now() - service.lastPolledAt.getTime() < 3 * service.intervalSeconds * 1000;
-    const step = (id: string, label: string, status: 'done' | 'todo' | 'attention', detail: string | null = null) => ({ id, label, status, detail });
+    // Without a key of its own, a workspace gets fixes only when the plan includes model spend.
+    const keyIncluded = usageNow.includedModelUsd != null;
+    type Status = 'done' | 'todo' | 'attention';
+    const step = (id: string, label: string, status: Status, detail: string | null = null) => ({ id, label, status, detail });
+    const serviceStatus: Status = !service ? 'todo' : service.healthVerifiedAt && polledRecently ? 'done' : 'attention';
+    const serviceDetail = !service
+      ? null
+      : !service.healthVerifiedAt
+        ? service.healthLastError ?? `${service.name}: health URL not yet tested`
+        : polledRecently
+          ? `${service.name}: ${service.lastPollOutcome ?? 'watched'}`
+          : `${service.name}: ${service.lastPollOutcome ?? 'waiting for the first poll'}`;
+    const steps = [
+      step(
+        'github',
+        'Connect GitHub and pick a repository',
+        picked.length ? 'done' : installs.length ? 'attention' : 'todo',
+        picked.length ? picked.map((r) => r.fullName).join(', ') : installs.length ? `installed on ${installs.map((i) => i.accountLogin).join(', ')}; no repository picked yet` : null,
+      ),
+      step(
+        'alerts',
+        'Connect Datadog or Sentry',
+        !alerts ? 'todo' : alerts.verifiedAt ? 'done' : 'attention',
+        !alerts ? null : alerts.verifiedAt ? `${alerts.provider} verified ${alerts.verifiedAt.toISOString()}` : alerts.lastError ?? `${alerts.provider} connected, not yet tested`,
+      ),
+      step('slack', 'Connect Slack', slackRow ? 'done' : 'todo', slackRow?.teamName ?? null),
+      step(
+        'model_key',
+        'Add a model key',
+        anthropicRow ? 'done' : keyIncluded ? 'done' : 'todo',
+        anthropicRow ? 'your own Anthropic key' : keyIncluded ? `included in the ${usageNow.plan.name} plan` : null,
+      ),
+      step('service', 'Add the service to watch', serviceStatus, serviceDetail),
+    ];
     return {
-      steps: [
-        step('signed_in', 'Signed in with GitHub', 'done'),
-        step('github', 'Install the GitHub App', installs.length ? 'done' : 'todo', installs.map((i) => i.accountLogin).join(', ') || null),
-        step('repository', 'Pick a repository', repos.some((r) => !r.detachedAt) ? 'done' : 'todo', repos.filter((r) => !r.detachedAt).map((r) => r.fullName).join(', ') || null),
-        step(
-          'datadog',
-          'Connect Datadog or Sentry',
-          !dd ? 'todo' : dd.verifiedAt ? 'done' : 'attention',
-          !dd ? null : dd.verifiedAt ? `verified ${dd.verifiedAt.toISOString()}` : dd.lastError ?? 'connected, not yet tested',
-        ),
-        step('slack', 'Connect Slack', slackRow ? 'done' : 'todo', slackRow?.teamName ?? null),
-        step('service', 'Add a service', service ? 'done' : 'todo', service ? `${service.name} → ${service.slackChannelName ?? service.slackChannelId}` : null),
-        step(
-          'health',
-          'Check the health URL reports a revision',
-          !service ? 'todo' : service.healthVerifiedAt ? 'done' : 'attention',
-          service?.healthLastError ?? (service?.healthVerifiedAt ? 'reports a revision' : null),
-        ),
-        step(
-          'watching',
-          'Being watched',
-          !service ? 'todo' : polledRecently ? 'done' : 'attention',
-          service?.lastPollOutcome ?? (service ? 'waiting for the first poll' : null),
-        ),
-      ],
+      steps,
+      complete: service !== null,
+      attention: steps.some((s) => s.status === 'attention'),
       plan: usageNow,
       testIncident: sampleJob[0]
         ? { status: sampleJob[0].status, result: sampleJob[0].result, error: sampleJob[0].lastError, at: sampleJob[0].createdAt }
