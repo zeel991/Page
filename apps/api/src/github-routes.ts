@@ -88,8 +88,12 @@ export async function registerGitHubRoutes(app: FastifyInstance, deps: GitHubRou
     }
   });
 
+  /** The workspace's installations, each with the GitHub page where its repositories are edited. */
   app.get('/api/github/installations', async (request) => ({
-    installations: await installations.forOrganization(auth(request).organizationId),
+    installations: (await installations.forOrganization(auth(request).organizationId)).map((row) => ({
+      ...row,
+      settingsUrl: deps.github ? deps.github.installationSettingsUrl(row) : null,
+    })),
   }));
 
   /** Repositories the workspace's installations cover, marked with which are picked. */

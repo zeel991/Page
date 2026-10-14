@@ -52,6 +52,18 @@ export async function addRepository(fullName: string, _prev: FormState | null): 
   return stateOf(r, `${fullName} added.`);
 }
 
+export async function removeRepository(id: string, fullName: string, _prev: FormState | null): Promise<FormState> {
+  const r = await apiCall(`/api/repositories/${id}`, { method: 'DELETE' });
+  refresh();
+  return stateOf(r, `${fullName} removed. Services on it keep running until pointed at another repository.`);
+}
+
+export async function changeServiceRepository(serviceId: string, _prev: FormState | null, form: FormData): Promise<FormState> {
+  const r = await apiCall(`/api/services/${serviceId}`, { method: 'PATCH', body: { repositoryId: text(form, 'repositoryId') } });
+  refresh();
+  return stateOf(r, 'Repository changed. The next poll reads from it.');
+}
+
 export async function createService(_prev: FormState | null, form: FormData): Promise<FormState> {
   const channel = text(form, 'slackChannel');
   const [slackChannelId, slackChannelName] = channel.split('|');

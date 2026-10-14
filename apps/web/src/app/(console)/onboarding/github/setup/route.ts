@@ -13,6 +13,8 @@ import { noticeFor } from '@/lib/notices';
 export async function GET(request: NextRequest) {
   const q = request.nextUrl.searchParams;
   if (q.get('setup_action') === 'request') redirect('/onboarding?notice=github_requested');
+  // Repositories were added to or removed from an existing installation on GitHub.
+  if (q.get('setup_action') === 'update') redirect('/services?notice=github_updated#repositories');
   const installationId = q.get('installation_id');
   const state = q.get('state');
   const code = q.get('code');

@@ -6,6 +6,7 @@
  */
 export const NOTICES: Record<string, { tone: 'ok' | 'error'; text: string }> = {
   github_connected: { tone: 'ok', text: 'GitHub App installed. Pick the repositories to watch.' },
+  github_updated: { tone: 'ok', text: 'Installation updated on GitHub. Its repositories are listed below; pick the ones to watch.' },
   github_requested: { tone: 'ok', text: 'Installation requested. An owner of that GitHub organization has to approve it; come back here once they have.' },
   github_no_code: {
     tone: 'error',

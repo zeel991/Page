@@ -64,6 +64,17 @@ export class GitHubAppClient {
     return `${this.web}/apps/${encodeURIComponent(this.config.slug)}/installations/new?state=${encodeURIComponent(state)}`;
   }
 
+  /**
+   * Where an installation's repositories are added or removed: GitHub's own settings
+   * page for it, which differs for a user account and an organization.
+   */
+  installationSettingsUrl(installation: { installationId: number; accountLogin: string; accountType: string }): string {
+    const base = installation.accountType === 'Organization'
+      ? `${this.web}/organizations/${encodeURIComponent(installation.accountLogin)}/settings/installations`
+      : `${this.web}/settings/installations`;
+    return `${base}/${installation.installationId}`;
+  }
+
   /** Exchange the OAuth code GitHub appends to the setup redirect for a user-to-server token. */
   async exchangeCode(code: string): Promise<string> {
     const res = await this.fetchImpl(`${this.web}/login/oauth/access_token`, {

@@ -32,6 +32,20 @@ describe('GitHub App installation', () => {
     expect((await h.call('GET', '/api/repositories', alice.token)).json()).toMatchObject({
       repositories: [expect.objectContaining({ fullName: 'acme/checkout-api', defaultBranch: 'main' })],
     });
+
+    // The console sends people to GitHub's own page for the installation to add or remove repositories.
+    const { installations } = (await h.call('GET', '/api/github/installations', alice.token)).json() as {
+      installations: { installationId: number; settingsUrl: string | null }[];
+    };
+    expect(installations).toHaveLength(1);
+    expect(installations[0]!.settingsUrl).toMatch(new RegExp(`/settings/installations/${installations[0]!.installationId}$`));
+
+    // A picked repository can be removed again; it then no longer counts as picked.
+    const [{ id }] = ((await h.call('GET', '/api/repositories', alice.token)).json() as { repositories: { id: string }[] }).repositories;
+    expect((await h.call('DELETE', `/api/repositories/${id}`, alice.token)).statusCode).toBe(200);
+    expect((await h.call('GET', '/api/github/repositories', alice.token)).json()).toMatchObject({
+      repositories: [expect.objectContaining({ fullName: 'acme/checkout-api', picked: false })],
+    });
   });
 
   // The setup URL carries an installation id; on its own it would let anyone attach
