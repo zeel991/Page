@@ -1,0 +1,23 @@
+# Render's free web service sleeps after 15 idle minutes and takes about a minute to
+# wake, which is paid by whoever signs in or whatever webhook GitHub sends next. A
+# request every few minutes keeps it awake. Scheduled runs can lag, which is fine
+# inside a 15-minute window. docs/launch.md explains the free-hours cost.
+name: Keep the API awake
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: GET /health
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 https://pager-api-0z8e.onrender.com/health)
+          echo "health answered $code"
+          [ "$code" = "200" ]

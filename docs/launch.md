@@ -18,7 +18,21 @@ At the end, `pnpm launch:check` asks the running services whether they are ready
 | Model | Each workspace's own Anthropic key | $0 to you | Free workspaces include no model spend (migration 0012) |
 
 Hostnames used below: `CONSOLE` (`https://page-iota-six.vercel.app`) and `API`
-(`https://pager-api.onrender.com`, or whatever name Render gives it).
+(`https://pager-api-0z8e.onrender.com`; Render appends a suffix to the blueprint's
+name).
+
+## Where it stands
+
+| Step | State (2026-10-16) |
+| --- | --- |
+| 1. GitHub App | done |
+| 2. Neon | done |
+| 3. API on Render | live, deploys from `main` |
+| 4. Console on Vercel | live, deploys from `main` |
+| 5. Slack app | **not created**: `deploy/slack/manifest.json` is the app, see step 5 |
+| 6. Worker | runs on the operator's Mac with `deploy/worker/run-here.sh` |
+| 7. `pnpm launch:check` | 16 of 16 |
+| Uptime | `.github/workflows/keep-api-awake.yml` pings `API/health` every 5 minutes |
 
 ## 1. The GitHub App
 
@@ -62,8 +76,12 @@ The API migrates the database as it starts. When it is live, `curl API/health`
 answers `{"status":"ok"}`. From **Environment Groups → pager-secrets**, copy
 `PAGER_SESSION_SECRET` (step 4) and `PAGER_MASTER_KEY` (step 6).
 
-Then point an uptime monitor (UptimeRobot's free plan: HTTP, every 5 minutes) at
-`API/health`, so the API is awake when GitHub and Slack call it.
+Then keep it awake, so it is up when GitHub and Slack call it and when someone signs
+in: `.github/workflows/keep-api-awake.yml` requests `API/health` every 5 minutes from
+GitHub Actions (free on a public repository; put the real `API` hostname in it). An
+uptime monitor such as UptimeRobot does the same job. Either way the service runs all
+month, about 744 of the workspace's 750 free instance hours, so suspend any other free
+Render service in the workspace or Render will pause whichever runs out.
 
 ## 4. The console on Vercel
 
@@ -87,11 +105,12 @@ set.
 
 ## 5. The Slack app
 
-api.slack.com → **Create New App** → From scratch:
+api.slack.com/apps → **Create New App** → **From a manifest** → pick any workspace
+you are in → paste `deploy/slack/manifest.json` (JSON tab) → Create. It carries the
+redirect URL `CONSOLE/onboarding/slack/callback` and the bot scopes `chat:write`,
+`channels:read`, `groups:read`, `users:read`, `users:read.email`.
 
-- **OAuth & Permissions**: redirect URL `CONSOLE/onboarding/slack/callback`; bot
-  scopes `chat:write`, `channels:read`, `groups:read`, `users:read`,
-  `users:read.email`.
+- **Basic Information**: copy the Client ID and Client Secret.
 - **Manage Distribution**: activate public distribution, so other workspaces can
   install it.
 - **Interactivity**: leave off. It carries the Merge button, which exists only at

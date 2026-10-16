@@ -1,0 +1,24 @@
+{
+  "display_information": {
+    "name": "Pager Developer",
+    "description": "Reports production incidents, with the investigation, the fix and the validation, in the channel you choose.",
+    "background_color": "#1a1a1a"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Pager Developer",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": ["https://page-iota-six.vercel.app/onboarding/slack/callback"],
+    "scopes": {
+      "bot": ["chat:write", "channels:read", "groups:read", "users:read", "users:read.email"]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
